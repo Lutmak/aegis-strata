@@ -45,7 +45,7 @@ compiler, `make` and `git`. The tests also need `python3` and `curl`.
 A 12 GB card is enough. You also need plenty of system RAM — the model occupies about 43 GB while
 running.
 
-## Build
+## Step 1: build
 
 ```
 git clone https://github.com/Lutmak/aegis-strata && cd aegis-strata
@@ -73,7 +73,7 @@ and no model, so it runs anywhere.
 The Makefile tries `g++-15`, `g++-14` and so on until one works, and says which it chose. Override
 with `HOSTCXX=/usr/bin/g++-14 make build`.
 
-## Get the model
+## Step 2: get the model
 
 Only **Qwen3.8-Flash-Next** in the GSQ-RCO IQ3_XXS quantisation is supported.
 
@@ -98,7 +98,7 @@ than running. `mtp_fetch.py verify` checks each tensor's hash and exits 3 listin
 
 This is one-off work you run by hand. It is not part of the build and not part of the server.
 
-## Run
+## Step 3: run
 
 ```
 build/bin/aegis --engine build/bin/strata \
