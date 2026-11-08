@@ -1,4 +1,4 @@
-// UnbiasedStrata: a picture encoded once is a picture encoded once.
+// aegis-strata: a picture encoded once is a picture encoded once.
 //
 // A chat client resends the whole conversation on every turn, pictures included, and the vision encoder is the slow
 // part of a request (USTRAT-15: 6 s a screenshot on 16 CPU threads, 18 s on 6; the engine then reuses the prompt's

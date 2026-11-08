@@ -1,9 +1,9 @@
-# UnbiasedStrata 2 build.  Needs CMake 3.24+, a C++20 compiler, a C compiler and a CUDA 12.x toolkit with its driver.
+# aegis-strata build.  Needs CMake 3.24+, a C++20 compiler, a C compiler and a CUDA 12.x toolkit with its driver.
 # Nothing is downloaded: ggml, llama, common and mtmd come from the third_party/llama.cpp submodule.
 #
 #   git clone <repo> && cd <repo>
 #   git submodule update --init
-#   make build                      # build/bin/{strata,strata-poly,strata-dsv41,libstrata_kq.so,unbiased-strata}
+#   make build                      # build/bin/{strata,libstrata_kq.so,aegis}
 #   make test                       # the front end against a fake engine; no GPU needed
 #
 BUILD_DIR  ?= build
@@ -46,7 +46,7 @@ COMPILER_FLAGS := $(if $(HOSTCXX),-DCMAKE_C_COMPILER=$(HOSTCC) -DCMAKE_CXX_COMPI
 # capped: inside a container nproc reports the host's CPUs, not the container's quota
 JOBS       ?= $(shell n=$$(nproc 2>/dev/null || echo 4); [ $$n -gt 16 ] && n=16; echo $$n)
 # what `make build` produces; upstream's `all` also builds about 70 parity and bench programs
-TARGETS    := strata strata-poly strata-dsv41 strata_kq unbiased-strata
+TARGETS    := strata strata_kq aegis
 
 .PHONY: build configure clean test
 
@@ -54,31 +54,40 @@ configure:
 	@test -f third_party/llama.cpp/ggml/CMakeLists.txt || \
 	  { echo "third_party/llama.cpp is empty: run 'git submodule update --init' first"; exit 1; }
 	cmake -S . -B $(BUILD_DIR) -DCMAKE_BUILD_TYPE=Release -DSTRATA_ENABLE_CUDA=ON -DSTRATA_NATIVE_EXPERTS=ON \
-	      -DSTRATA_MMQ_KQUANTS=ON -DSTRATA_Q6K_EXPERTS=ON -DSTRATA_BUILD_DSV41=ON -DSTRATA_BUILD_TESTS=OFF \
+	      -DSTRATA_MMQ_KQUANTS=ON -DSTRATA_Q6K_EXPERTS=ON -DSTRATA_BUILD_TESTS=OFF \
 	      "-DCMAKE_CUDA_ARCHITECTURES=$(CUDA_ARCHS)" $(SM60_FLAG) $(PORTABLE_FLAG) $(COMPILER_FLAGS) -DCMAKE_CUDA_COMPILER=$(NVCC) \
 	      -DCMAKE_RUNTIME_OUTPUT_DIRECTORY=$(abspath $(BUILD_DIR))/bin \
 	      -DCMAKE_LIBRARY_OUTPUT_DIRECTORY=$(abspath $(BUILD_DIR))/bin $(CMAKE_EXTRA)
 
 build: configure
 	cmake --build $(BUILD_DIR) -j $(JOBS) --target $(TARGETS)
-	@echo "built:"; ls -1 $(BUILD_DIR)/bin/strata $(BUILD_DIR)/bin/strata-poly $(BUILD_DIR)/bin/strata-dsv41 $(BUILD_DIR)/bin/libstrata_kq.so $(BUILD_DIR)/bin/unbiased-strata
+	@echo "built:"; ls -1 $(BUILD_DIR)/bin/strata $(BUILD_DIR)/bin/libstrata_kq.so $(BUILD_DIR)/bin/aegis
 
 # The front end alone, without CUDA: for a laptop or a CI box. Needs only a C++20 compiler and CMake.
 .PHONY: frontend
 frontend:
 	cmake -S . -B $(BUILD_DIR)-frontend -DCMAKE_BUILD_TYPE=Release -DSTRATA_ENABLE_CUDA=OFF -DSTRATA_BUILD_TESTS=OFF \
 	      -DCMAKE_RUNTIME_OUTPUT_DIRECTORY=$(abspath $(BUILD_DIR))-frontend/bin $(CMAKE_EXTRA)
-	cmake --build $(BUILD_DIR)-frontend -j $(JOBS) --target unbiased-strata
+	cmake --build $(BUILD_DIR)-frontend -j $(JOBS) --target aegis
 
 # The front end's tests, against a fake engine (frontend/tests/fake-engine.py): the adapter's cases (cancel, drain,
 # backpressure, child exit, ERR) and the HTTP surface a coding agent touches (frontend/tests/e2e.sh).  Needs python3
 # and curl; no GPU and no model.  Runs in the CUDA-free build directory, so it works on the build box and on a laptop.
 test: frontend
-	cmake --build $(BUILD_DIR)-frontend -j $(JOBS) --target engine_test literals_test picture_cache_test
+	cmake --build $(BUILD_DIR)-frontend -j $(JOBS) --target engine_test literals_test picture_cache_test sandbox_test
 	$(BUILD_DIR)-frontend/bin/engine_test frontend/tests/fake-engine.py
 	$(BUILD_DIR)-frontend/bin/literals_test
 	$(BUILD_DIR)-frontend/bin/picture_cache_test
-	frontend/tests/e2e.sh $(BUILD_DIR)-frontend/bin/unbiased-strata
+	frontend/tests/e2e.sh $(BUILD_DIR)-frontend/bin/aegis
+# The documentation makes checkable claims, so they get checked: file:line citations that resolve,
+# backticked paths that exist, the filter's instruction count and kill list against the code, and quoted
+# log lines that a reader could actually grep for.  No GPU, no model, under a second.
+	python3 tools/check_docs.py
+# Last on purpose.  sandbox_test exits 77 when the kernel cannot enforce the sandbox, and make stops at the first
+# failure -- run earlier, a skip would silently take the rest of the suite with it, which is how a kernel without
+# Landlock used to turn into "no tests ran" rather than "one test skipped".  77 is still a failure and not a pass:
+# a runner that cannot enforce the sandbox must not report green on an untested security control.
+	$(BUILD_DIR)-frontend/bin/sandbox_test
 
 clean:
-	rm -rf $(BUILD_DIR)
+	trash $(BUILD_DIR) $(BUILD_DIR)-frontend 2>/dev/null || true

@@ -3,9 +3,9 @@
 # own test models (no GPU, no weights). Checks the HTTP surface a coding agent touches: /health, /v1/models,
 # a non-streaming chat completion, a streaming one, a client that disconnects mid-stream, and an engine error.
 #
-#   frontend/tests/e2e.sh <unbiased-strata binary> [model.gguf]
+#   frontend/tests/e2e.sh <aegis binary> [model.gguf]
 set -u
-BIN=${1:?usage: e2e.sh <unbiased-strata> [model.gguf]}
+BIN=${1:?usage: e2e.sh <aegis> [model.gguf]}
 HERE=$(cd "$(dirname "$0")" && pwd)
 ROOT=$(cd "$HERE/../.." && pwd)
 MODEL=${2:-$ROOT/third_party/llama.cpp/models/ggml-vocab-qwen35.gguf}
@@ -81,7 +81,7 @@ code=$(curl -s -o "$BIG" -w '%{http_code}' "$URL/v1/chat/completions" -H 'conten
 check $([ "$code" = 400 ] && echo 0 || echo 1) "oversize prompt -> $code: $(j 'd["error"]["type"]' < "$BIG")"
 
 # a picture without --mmproj is refused with llama.cpp's own message, not a crash (with --mmproj the rows go to the
-# engine as GENI; that path needs a real projector file and is checked by frontend/tests/images-real-engine.sh)
+# engine as GENI; that path needs a real projector file and no check for it ships in this fork)
 IMG=$(mktemp "${TMPDIR:-/tmp}/us2-e2e-img-XXXXXX")
 img=$(curl -s -o "$IMG" -w '%{http_code}' "$URL/v1/chat/completions" -H 'content-type: application/json' -d '{"model":"fake","messages":[{"role":"user","content":[{"type":"text","text":"what is this"},{"type":"image_url","image_url":{"url":"data:image/png;base64,iVBORw0KGgo="}}]}]}')
 # llama.cpp raises this as a runtime error, which its ex_wrapper maps to 500 (llama-server answers the same)

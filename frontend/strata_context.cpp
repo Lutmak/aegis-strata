@@ -1,4 +1,4 @@
-// UnbiasedStrata: the server context with a Strata engine behind it. See strata_context.hpp.
+// aegis-strata: the server context with a Strata engine behind it. See strata_context.hpp.
 //
 // Where a function here mirrors one in llama.cpp's tools/server/server-context.cpp it says so; those are the places
 // to look when the submodule pin moves.
@@ -42,8 +42,8 @@ namespace {
 // how long update_slots() waits for an engine line before returning to the queue (which then sees cancels)
 constexpr int ENGINE_POLL_MS = 20;
 
-// the engine keeps this many context slots back; a prompt plus max_new may not reach the context (UnbiasedStrata 1,
-// REGINA-112: every request without max_tokens got a 500 until the front end counted it)
+// the engine keeps this many context slots back; a prompt plus max_new may not reach the context. Upstream hit
+// this: every request without max_tokens got a 500 until the front end counted it.
 constexpr int ENGINE_CONTEXT_RESERVE = 8;
 
 // mirrors server_slot in server-context.cpp, for the one slot the engine is
@@ -167,13 +167,28 @@ std::string file_stem(const std::string & path) {
 
 } // namespace
 
+// What containment the engine child actually got. Kept separate from the --no-sandbox request because the
+// two differ: a kernel without Landlock, a macOS build, and a refused network namespace are each a distinct
+// state an operator needs to tell apart, and reporting them all as "enforced" or all as "off" hides the
+// difference that matters.
+enum class SandboxState { Off, Unavailable, Enforced, EnforcedNoNetns };
+
+const char * sandbox_state_name(SandboxState s) {
+    switch (s) {
+        case SandboxState::Enforced:        return "enforced";
+        case SandboxState::EnforcedNoNetns: return "enforced-no-netns";
+        case SandboxState::Unavailable:     return "unavailable";
+        default:                            return "off";
+    }
+}
+
 struct strata_context_impl {
     common_params params;
 
     llama_model *       model = nullptr;
     const llama_vocab * vocab = nullptr;
 
-    // images (PLAN.md step 8): the model's vision encoder and projector (--mmproj) run in this process on the CPU
+    // images: the model's vision encoder and projector (--mmproj) run in this process on the CPU
     // through llama.cpp's mtmd, as upstream's strata-vision did in a child; the rows go to the engine in a file named
     // by a GENI request. Without --mmproj mctx stays null and image_url parts are refused by
     // oaicompat_chat_params_parse with llama.cpp's own message.
@@ -185,7 +200,7 @@ struct strata_context_impl {
     strata_frontend::PictureCache pictures; // encoded rows per picture (--picture-cache N; 64 pictures, 1 GiB)
 
     // the texts of the vocabulary's control tokens and marker-like added tokens: inside a message they are text
-    // (literals.hpp, USTRAT-14)
+    // (literals.hpp)
     strata_frontend::Literals literals;
 
     server_chat_params           chat_params;
@@ -201,7 +216,14 @@ struct strata_context_impl {
     Engine                   engine;
     std::string              engine_exe;
     std::vector<std::string> engine_args;
-    bool                     engine_is_poly = false;
+    // A directory of our own for the GENI picture handover, so the sandbox can grant the engine that and not
+    // all of /tmp -- which holds every other program's scratch data, including this machine's agent transcripts.
+    std::string              pictures_dir;
+    strata_frontend::SandboxPlan sandbox;              // outlives the fork: the child reads it after fork()
+    bool                     sandbox_enabled = true;   // --no-sandbox: the REQUEST
+    SandboxState             sandbox_state = SandboxState::Off;   // the OUTCOME, set after the engine starts
+    std::vector<std::string> sandbox_allow_read;       // --sandbox-allow-read
+    std::vector<std::string> sandbox_allow_write;      // --sandbox-allow-write
     long long                n_ctx = 0;
     std::atomic<bool>        engine_dead{false};
 
@@ -380,7 +402,7 @@ struct strata_context_impl {
                           (double) s.penalty_repeat, (double) s.penalty_freq, (double) s.penalty_present);
             h += b;
         }
-        if (!s.logit_bias.empty() && !engine_is_poly) {
+        if (!s.logit_bias.empty()) {
             std::string lb = " logit_bias=";
             for (size_t i = 0; i < s.logit_bias.size(); ++i) {
                 if (i) lb += ',';
@@ -391,7 +413,7 @@ struct strata_context_impl {
         }
         if (!images_path.empty()) {
             // GENI <max_new> [key=value ...] image_pad=<id> <file> <ids>: the engine reads strata-vision records from the
-            // file and places them at the runs of image_pad (src/poly/main.cpp take_pictures, generate.cpp for strata)
+            // file and places them at the runs of image_pad (generate.cpp)
             // img_keys= (#2228): the conversation cache matches a picture by its key and grid, not its rows
             const std::string keys = strata_frontend::PictureCache::hex_list(image_keys);
             if (!keys.empty()) {
@@ -520,8 +542,16 @@ struct strata_context_impl {
     }
 
     // the request's pictures file (slot.images_path, unlinked when the slot is released)
+    // The engine is the process this design distrusts, so a token id it sends is untrusted input. Without
+    // this bound, `T 2147483647` reaches llama_vocab's id_to_token.at(id), which throws std::out_of_range;
+    // nothing on the queue thread catches it, so a buggy or compromised engine terminates the front end.
+    bool token_in_vocab(int32_t tok) const {
+        return tok >= 0 && tok < llama_vocab_n_tokens(vocab);
+    }
+
     std::FILE * open_pictures_file(std::string & err) {
-        char name[] = "/tmp/unbiased-strata-pictures-XXXXXX";
+        char name[PATH_MAX];
+        std::snprintf(name, sizeof name, "%s/pictures-XXXXXX", pictures_dir.c_str());
         const int fd = ::mkstemp(name);
         if (fd < 0) {
             err = "cannot create the pictures file";
@@ -663,6 +693,20 @@ struct strata_context_impl {
     void handle_line(const EngineLine & line) {
         switch (line.kind) {
             case EngineLine::TOKEN:
+                if (!token_in_vocab(line.token)) {
+                    // Fail this request, not the process. The engine is the untrusted side of the boundary this
+                    // project exists to draw, and an id outside the vocabulary reaches llama_vocab's
+                    // id_to_token.at(id), which throws std::out_of_range -- on the queue thread, where nothing
+                    // catches it, so the front end would terminate on output from the process it distrusts.
+                    SRV_ERR("task %d: the engine sent token id %d, outside the vocabulary (0..%d)\n",
+                            slot.task->id, (int) line.token, (int) llama_vocab_n_tokens(vocab) - 1);
+                    if (!slot.cancelled) {
+                        send_error(*slot.task, "the engine sent a token id outside the vocabulary",
+                                   ERROR_TYPE_SERVER);
+                    }
+                    finish_slot();
+                    break;
+                }
                 if (!slot.cancelled && slot.has_next_token) {
                     on_token(line.token);
                 }
@@ -951,7 +995,7 @@ struct strata_context_impl {
                 {"vocab_type",  llama_vocab_type(vocab)},
                 {"n_vocab",     llama_vocab_n_tokens(vocab)},
                 {"n_ctx",       n_ctx},
-                {"engine",      engine_is_poly ? "strata-poly" : "strata"},
+                {"engine",      "strata"},
             }},
         };
     }
@@ -1244,7 +1288,6 @@ bool strata_context::start_engine(const common_params & params, const std::strin
     impl->params      = params;
     impl->engine_exe  = engine_exe;
     impl->engine_args = engine_args;
-    impl->engine_is_poly = engine_exe.find("strata-poly") != std::string::npos;
 
     std::vector<std::string> argv;
     argv.push_back(engine_exe);
@@ -1252,7 +1295,75 @@ bool strata_context::start_engine(const common_params & params, const std::strin
     for (const auto & a : engine_args) {
         argv.push_back(a);
     }
-    return impl->engine.start(engine_exe, argv, err);
+
+    // Containment of the child, built here because the forked child must not allocate (strata_sandbox.h).
+    // A directory of our own for the picture handover, made before the policy is built so the policy can
+    // name it. Granting this instead of all of /tmp is the difference between the engine seeing one file we
+    // wrote and seeing every other program's scratch data on the box.
+    std::vector<std::string> allow_read = impl->sandbox_allow_read;
+    {
+        char dir[] = "/tmp/aegis-XXXXXX";
+        if (::mkdtemp(dir) == nullptr) {
+            err = std::string("cannot create the picture handover directory in /tmp: ") + std::strerror(errno);
+            return false;
+        }
+        impl->pictures_dir = dir;
+        allow_read.push_back(impl->pictures_dir);
+    }
+
+    strata_frontend::SandboxConfig cfg;
+    cfg.enabled = impl->sandbox_enabled;
+    if (cfg.enabled) {
+#if !defined(__linux__)
+        // The mechanism does not exist on this platform. That is a compile-time fact about the platform rather
+        // than a check that failed, and refusing to start here would simply delete macOS from the project.
+        std::fprintf(stderr, "sandbox: not available on this platform; the engine runs uncontained\n");
+        cfg.enabled           = false;
+        impl->sandbox_enabled = false;
+        impl->sandbox_state   = SandboxState::Unavailable;   // not the same thing as the operator choosing --no-sandbox
+#else
+        std::string why;
+        if (!strata_frontend::sandbox_available(why)) {
+            err = "the engine cannot be contained on this system: " + why +
+                  ". Pass --no-sandbox to run it uncontained, and read the warning that prints when you do.";
+            return false;
+        }
+        std::vector<std::string> notes;
+        cfg = strata_frontend::sandbox_default_config(engine_exe, params.model.path, engine_args,
+                                                      allow_read, impl->sandbox_allow_write, notes);
+        for (const std::string & n : notes) {
+            LOG_INF("sandbox: %s\n", n.c_str());
+        }
+#endif
+    }
+    if (!strata_frontend::sandbox_plan(cfg, impl->sandbox, err)) {
+        return false;
+    }
+    // Every rule that will actually be installed, resolved. A rule on a directory grants its whole subtree, so
+    // this -- not the arguments it came from -- is the policy an operator audits.
+    for (const std::string & g : impl->sandbox.granted) {
+        LOG_INF("sandbox: grants %s\n", g.c_str());
+    }
+    if (!impl->engine.start(engine_exe, argv, err, &impl->sandbox)) {
+        return false;
+    }
+    // Only now is the outcome known: the network namespace is created by the forked child, and a kernel that
+    // refuses an unprivileged user namespace degrades the sandbox without failing it. Logging "enforced" before
+    // the fork could only ever have reported the request.
+    if (impl->sandbox_enabled) {
+        impl->sandbox_state = impl->engine.sandbox_netns() ? SandboxState::Enforced : SandboxState::EnforcedNoNetns;
+        LOG_INF("sandbox: %s (%s)\n",
+                impl->sandbox_state == SandboxState::Enforced ? "enforced" : "ENFORCED WITHOUT A NETWORK NAMESPACE",
+                strata_frontend::sandbox_describe(impl->sandbox, impl->engine.sandbox_netns()).c_str());
+    }
+    return true;
+}
+
+void strata_context::set_sandbox(bool enabled, std::vector<std::string> allow_read,
+                                 std::vector<std::string> allow_write) {
+    impl->sandbox_enabled     = enabled;
+    impl->sandbox_allow_read  = std::move(allow_read);
+    impl->sandbox_allow_write = std::move(allow_write);
 }
 
 void strata_context::set_picture_cache(size_t entries, size_t bytes) {
@@ -1401,6 +1512,7 @@ void strata_context::init_routes(server_http_context & http) {
         // its is_strata / wait_ready) look for: "service" and "loaded". The engine only serves once loaded.
         res->ok({{"status", "ok"}, {"busy", I->slot.active()},
                  {"service", "strata"}, {"loaded", true},
+                 {"sandbox", sandbox_state_name(I->sandbox_state)},
                  {"model", I->model_name}, {"max_context", I->n_ctx}});
         return res;
     };
@@ -1429,7 +1541,9 @@ void strata_context::init_routes(server_http_context & http) {
             {"chat_template", common_chat_templates_source(I->chat_params.tmpls.get())},
             {"chat_template_caps", caps},
             {"build_info", std::string(llama_build_info())},
-            {"engine", I->engine_is_poly ? "strata-poly" : "strata"},
+            {"engine", "strata"},
+            // the containment state of the engine child: an operator's only way to check a running server
+            {"sandbox", sandbox_state_name(I->sandbox_state)},
         });
         return res;
     };

@@ -88,9 +88,6 @@
 #endif
 #include "strata/artifact/gguf_reader.hpp"
 #include "strata/core/family_layout.hpp"
-#if defined(STRATA_HAVE_QWEN35)
-#include "strata/qwen35/engine.hpp"
-#endif
 #if defined(_WIN32)
 #include <windows.h>
 #include <psapi.h>
@@ -887,7 +884,7 @@ void usage() {
                  "                       give VRAM back to other programs between requests and take it back later\n"
                  "  --batch N / --slots N  --serve (opt-in): up to N requests decode together in batch slots (2..8\n"
                  "                       normally; --batch-mtp waves more through eight-row windows),\n"
-                 "                       each slot with its own session (VRAM like the main one); docs/BATCHING.md\n"
+                 "                       each slot with its own session (VRAM like the main one)\n"
                  "  --batch-mtp          --batch (opt-in, needs --mtp and --spec): each slot also verifies one MTP proposal per\n"
                  "                       window (STRATA_BATCH_MTP=1 does the same); works on one GPU and on a layer split (the\n"
                  "                       slot drafters sit on the last stage's GPU; not with --batch-groups); needs VRAM per slot\n"
@@ -895,7 +892,7 @@ void usage() {
                  "  --pipeline-windows N --serve with a layer split on two GPUs (on by default for 2+ stages on AMD gfx12;\n"
                  "                       STRATA_PIPELINE_AUTO=0 or N=0 turns it off): one conversation's verify windows\n"
                  "                       with the GPUs overlapped - 1 = the prompt's short reads, 2 = decode as well\n"
-                 "                       (stage 0 runs the next window while stage 1 verifies this one); docs/MULTI_GPU.md\n"
+                 "                       (stage 0 runs the next window while stage 1 verifies this one)\n"
                  "  --trim-stage-weights an explicit --layer-split: each GPU loads only its own layers' dense weights\n"
                  "  --prompt-cache-every N  --serve: also checkpoint every N fresh prompt tokens (default 16384, 0 = off)\n"
                  "  --prompt-cache-tail  --serve, single GPU: one extra checkpoint near the prompt's end, at an existing\n"
@@ -916,7 +913,7 @@ void usage() {
                  "  --spec N             the MTP drafter's verify window: how many tokens it proposes per check (setup\n"
                  "                       writes 4; --suffix-draft lets it grow by 2, up to 8, where a repeat is likely)\n"
                  "  --spec-min-p P       how sure the draft layer must be to extend a verify window by another guess\n"
-                 "                       (setup writes 0.5; --calibrate measures it on this PC, see docs/DETAILS.md)\n"
+                 "                       (--calibrate measures it on this machine)\n"
                  "  --lookup-chain K     opt-in: after the MTP's drafts, add up to K prompt-lookup drafts that continue\n"
                  "                       them (the window grows to at most 8; default 0 = off)\n"
                  "  --lookup-chain-min M  the shortest context match --lookup-chain extends on (default 3)\n"
@@ -946,7 +943,7 @@ void usage() {
                  "  --stage-timing       per-stage KERNEL-COUNT shares.  NOT a time profile: an uncaptured\n"
                  "                       event interval includes host gaps, so run with --gpu-only-full first\n"
                  "  --graph-only         MEASURE: replay the 48 `pre` graphs only.  OMITS the 48 `post` graphs\n"
-                 "                       and the LM head, so it is NOT the GPU floor (R0.3, Memory/ERRORS.md A4)\n"
+                 "                       and the LM head, so it is NOT the GPU floor\n"
                  "  --gpu-only-full      MEASURE: replay pre+post for all 48 layers plus the LM head, no pool.\n"
                  "                       THE TRUE PER-TOKEN GPU FLOOR.  Quote this one, not --graph-only.\n"
                  "  --stats              print the per-stage breakdown\n"
@@ -1404,7 +1401,7 @@ void stall_report(std::FILE* f, uint64_t layers_during) {
                      vf >= kVramSafeMib ? "" : " - LOW: a card this full can page GPU memory to system RAM (decode "
                      "falls to a few tok/s, then a window never finishes, #2065); a larger --vram-reserve-mib, a "
                      "smaller --max-context, or 'Prefer No Sysmem Fallback' for the engine in the NVIDIA control panel "
-                     "(docs/DETAILS.md) leaves room");
+                     "leaves room");
     }
     for (int pass = 0; pass < 2; ++pass) {
         if (pass == 1) {
@@ -2195,11 +2192,7 @@ int main(int argc, char** argv) {
         }
         // `strata --families`: the GGUF architectures this build runs (setup asks before it installs one)
         if (std::strcmp(argv[i], "--families") == 0) {
-#if defined(STRATA_HAVE_QWEN35)
-            std::printf("qwen4exp qwen35moe\n");
-#else
             std::printf("qwen4exp\n");
-#endif
             return 0;
         }
     }
@@ -2249,23 +2242,6 @@ int main(int argc, char** argv) {
 #endif
         break;
     }
-#if defined(STRATA_HAVE_QWEN35)
-    // **THE FAMILY SWITCH.**  A Qwen3.6-35B-A3B file (GGUF architecture qwen35moe) runs on its own engine path
-    // (src/qwen35), decided here from the file's header before any of this engine's state exists; every other file
-    // goes on below exactly as before.  Only the architecture string is read (the header of --native's shard).
-    for (int i = 1; i + 1 < argc; ++i) {
-        if (std::strcmp(argv[i], "--native") != 0 && std::strcmp(argv[i], "--model") != 0) continue;
-        bool qwen35 = false;
-        try {
-            const strata::GgufFile meta(strata::gguf_split_paths(argv[i + 1]).front());
-            qwen35 = strata::model_family(meta) == strata::ModelFamily::Qwen35Moe;
-        } catch (const std::exception&) {
-            // not readable here: the normal path below reports it
-        }
-        if (qwen35) return strata::qwen35::run(argc, argv);
-        break;
-    }
-#endif
     Options o;
     bool have_tokens = false;
     bool have_logits_stride = false;
@@ -3198,8 +3174,7 @@ int main(int argc, char** argv) {
 #endif
         std::fprintf(stderr, "strata generate: this CPU (%s) does not support AVX2 with FMA and F16C, which this engine's "
                              "CPU expert kernels need; Strata runs on Intel Haswell (2013), AMD Zen (2017) or newer. "
-                             "Older CPUs are EXPERIMENTAL and slow: setup compiles an engine for them on this PC "
-                             "(STRATA_ISA_FLOOR, see \"Older CPUs\" in docs/INSTALL.md)\n",
+                             "Older CPUs are EXPERIMENTAL and slow: build with -DSTRATA_ISA_FLOOR to target them\n",
                      strata::kernels::cpu::cpu_name().c_str());
         return 2;
     }
@@ -4042,7 +4017,7 @@ int main(int argc, char** argv) {
             if (!first_card)
                 std::fprintf(stderr, "strata generate: note: --pipeline-windows %d on a layer split of two stages without the draft layer "
                                      "on the first card (%s): the draft chain then shares the last card with its window and the "
-                                     "pipeline lost to the serial loop on 2x R9700 before 0.1.44 (docs/MULTI_GPU.md); kept as asked, "
+                                     "pipeline lost to the serial loop on 2x R9700 before 0.1.44; kept as asked, "
                                      "--pipeline-windows 0 turns it off\n", o.pipeline_windows,
                              !mtp_first_ok ? "it needs --mtp with --spec 2 or more and the draft head's subset file (draft_vocab.bin)"
                                            : "STRATA_MTP_STAGE0=1 asks for it");
@@ -5461,7 +5436,7 @@ int main(int argc, char** argv) {
                 const char* st = std::getenv("STRATA_IO_PF_STAGE");
                 if (st != nullptr && std::atoi(st) != 0)
                     std::fprintf(stderr, "strata generate: note: STRATA_IO_PF_STAGE=1 (staging) measured faster only on a 32 GB-class "
-                                         "box (+25%% on an RTX 3060, 32 GB); it was slower at 16 GB and on an iGPU (docs/DETAILS.md, file tier I/O)\n");
+                                         "box (+25%% on an RTX 3060, 32 GB); it was slower at 16 GB and on an iGPU\n");
 #if defined(STRATA_USE_HIP)
                 int igpu_dev = 0;
                 cudaDeviceProp igpu_p{};
@@ -5605,8 +5580,7 @@ int main(int argc, char** argv) {
                          "strata generate: hint: ~24x below what this hardware streams from a normal "
                          "launch. If Strata is started by Task Scheduler or a service, register the task "
                          "with Priority 4 (Normal) and 'Run with highest privileges' - the scheduler's "
-                         "defaults (Below normal + a least-privilege token) throttle the load. See "
-                         "docs/DETAILS.md ('Running it at startup').\n");
+                         "defaults (Below normal + a least-privilege token) throttle the load.\n");
         }
 #endif
         srcp = &arena_src;
@@ -6750,8 +6724,7 @@ int main(int argc, char** argv) {
             std::fprintf(stderr, "strata generate: %s%s\n", err.c_str(),
                          native_pack ? " - a native (IQ) pack has no per-layer graphs to replay. Its decode window's GPU "
                                        "stages are printed per request by the serve path instead: STRATA_VERIFY_PROFILE=1 "
-                                       "STRATA_DECODE_TIMING=1 with --serve (docs/DETAILS.md, \"Where a decode window's "
-                                       "time goes\")" : "");
+                                       "STRATA_DECODE_TIMING=1 with --serve" : "");
             return 1;
         }
         const int reps = 20;
@@ -8069,7 +8042,7 @@ int main(int argc, char** argv) {
                     // the helper tiers start at CUDA1 without a split (and are enabled in order)
                     std::fprintf(stderr, "strata serve:   a card this small can serve as a helper expert cache "
                                          "instead of a split stage: without --layer-split, with %s "
-                                         "(docs/SECOND_GPU.md)\n",
+                                         "(a second GPU is not supported in this fork)\n",
                                  dev == 1 ? "--expert-cache-device1 N" : "--expert-cache-device1..3 N, in order");
                 }
             }

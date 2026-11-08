@@ -1,4 +1,4 @@
-// UnbiasedStrata: a control token's text inside a message is text.
+// aegis-strata: a control token's text inside a message is text.
 //
 // The chat template renders one string with the messages' content interpolated, and that string is tokenized with
 // special tokens parsed, because the template's own markers (<|im_start|>, <|im_end|>, [gMASK]<sop>, ...) have to

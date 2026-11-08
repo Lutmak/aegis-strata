@@ -9,17 +9,6 @@
 # and is wrong about its own performance, which is the worst of both outcomes.
 cmake_minimum_required(VERSION 3.24)
 project(strata VERSION 0.1.45 LANGUAGES CXX)
-# EXPERIMENTAL: the Intel Arc engine, the SYCL port in sycl/ (PR #423; icpx + oneMKL, docs/INTEL_ARC.md). It is its
-# own project that takes the unported sources from src/; with this on, nothing below is configured.
-option(STRATA_ENABLE_SYCL "EXPERIMENTAL: build the Intel Arc (SYCL) engine from sycl/ - docs/INTEL_ARC.md" OFF)
-if(STRATA_ENABLE_SYCL)
-  if(STRATA_ENABLE_CUDA OR STRATA_ENABLE_HIP)
-    message(FATAL_ERROR "STRATA_ENABLE_SYCL is a separate backend; leave STRATA_ENABLE_CUDA and STRATA_ENABLE_HIP off")
-  endif()
-  message(WARNING "STRATA_ENABLE_SYCL: the Intel Arc engine is experimental (community port, docs/INTEL_ARC.md)")
-  add_subdirectory(sycl)
-  return()
-endif()
 add_compile_definitions(STRATA_VERSION="${PROJECT_VERSION}")
 # issue #31: release builds keep a PDB beside the exe (not shipped in it), so a minidump from a stalled engine can
 # be read back to the exact source line
@@ -77,7 +66,7 @@ option(STRATA_PREFILL_MMQ "Build the optional GGML MMQ prefill path for HIP" OFF
 # HIP a code object loads on first use, so they cost other models nothing there (R9700: the same slots).  Used at run
 # time with STRATA_MMQ_KQ=1 (opt-in: it changes the prompt's rounding against the FP16 path).
 option(STRATA_MMQ_KQUANTS "Build the MMQ prompt kernels for Q4_K / Q5_K / Q5_1 / Q6_K: the experts of Unsloth's K-quant files, and on HIP the dense GGUF projections (STRATA_DENSE_MMQ)" ON)
-# Q6_K gate/up in the grouped expert kernels (Unsloth's UD-Q6_K_XL, and layer 2 of UD-Q5_K_XL; docs/QUANTS.md).  On by
+# Q6_K gate/up in the grouped expert kernels (Unsloth's UD-Q6_K_XL, and layer 2 of UD-Q5_K_XL).  On by
 # default since MODEL-UPDATE Phase 1: one more instance per grouped kernel in iq_kernels.cu, +19 KB of sm_60 code,
 # measured to leave every expert-cache slot count as it was (P100, R9700).  -DSTRATA_Q6K_EXPERTS=OFF drops it.
 option(STRATA_Q6K_EXPERTS "Build the Q6_K gate/up grouped expert kernels (UD-Q6_K_XL, UD-Q5_K_XL)" ON)
@@ -94,11 +83,6 @@ option(STRATA_ORCA_Q4KS_MMQ "Build the GGML Q5_0 MMQ instance for OrcaRouter Q4_
 # only (not HIP, not gfx906); switched off at configure time when the llama.cpp tree's mmq.cuh is not one the copy
 # was verified against.
 option(STRATA_MMQ_TAB "Build the pointer-table prompt MMQ for STRATA_MMQ_DIRECT=1 (CUDA; ~37 MiB VRAM per GPU)" OFF)
-# strata-poly: the same pointer-table kernels (src/poly/mmq.cu's Mmq::mul_tab) for the cached experts of a routed
-# layer, so that a layer's cached experts go in one launch per 16 wherever follow() has traded their slots to, instead
-# of one per run of adjacent slots (Engine::moe_rows()).  Off by default for the same reasons: VRAM for the eagerly
-# loaded instances (~2 MiB a type) and nvcc time.  CUDA only, gated by the same fingerprint of mmq.cuh.
-option(STRATA_POLY_MMQ_TAB "Build the pointer-table MMQ for strata-poly's cached experts (CUDA; VRAM per type)" OFF)
 # The SHA-256 of mmq.cuh's mirrored region (mul_mat_q_process_tile through mul_mat_q_case, struct mmq_args included)
 # into `out`, or "" when the region is not found: src/prefill/moe_mmq_tab.cuh is a copy of that text and is used only
 # with a tree it was verified against (_strata_mmq_tab_known, below).
@@ -150,11 +134,6 @@ if(STRATA_BUILD_CONVERSATION_TESTS)
   add_executable(conversation_memory_test src/core/conversation_memory_test.cpp src/core/conversation_memory.cpp)
   target_include_directories(conversation_memory_test PRIVATE include)
   add_test(NAME conversation_memory_test COMMAND conversation_memory_test)
-  add_executable(glm_conversations_test src/poly/conversations_test.cpp)
-  add_test(NAME glm_conversations_test COMMAND glm_conversations_test)
-  add_executable(poly_guesses_test src/poly/guesses_test.cpp src/spec/draft_policy.cpp)
-  target_include_directories(poly_guesses_test PRIVATE include)
-  add_test(NAME poly_guesses_test COMMAND poly_guesses_test)
   add_executable(conversation_file_test src/core/conversation_file_test.cpp src/core/conversation_file.cpp)
   target_include_directories(conversation_file_test PRIVATE include)
   add_test(NAME conversation_file_test COMMAND conversation_file_test)
@@ -488,7 +467,7 @@ if(STRATA_ENABLE_CUDA OR STRATA_ENABLE_HIP)
     add_test(NAME qsa_scores_parity COMMAND qsa_scores_parity)
     set_tests_properties(qsa_scores_parity PROPERTIES SKIP_RETURN_CODE 77 ENVIRONMENT "STRATA_SCORES_THREAD=1")
   endif()
-  # QSAROWS (docs/QSAROWS.md): what the T rows of a verification window cost in a QSA layer's decode kernels at a long
+  # QSAROWS: what the T rows of a verification window cost in a QSA layer's decode kernels at a long
   # context (block scores, top-k, attention over each row's selection, indexer append), row by row; GPU, synthetic, no
   # model.  Not in the default build: `cmake --build <dir> --target qsa_rows_bench`.
   if(STRATA_ENABLE_CUDA)
@@ -732,26 +711,6 @@ if(STRATA_ENABLE_CUDA OR STRATA_ENABLE_HIP)
   target_include_directories(strata PRIVATE ${_strata_gpu_include_directories})
   target_link_libraries(strata PRIVATE strata_engine strata_prefill strata_spec ${_strata_gpu_runtime_target})
 
-  # NEW-MODELS-PLAN.md T1: Qwen3.6-35B-A3B's reference path (one GPU, the model resident, plain kernels), checked
-  # against llama.cpp by tools/qwen35/; the engine itself does not run the family yet
-  add_executable(strata-q36ref src/qwen35/q36ref.cu)
-  target_include_directories(strata-q36ref PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include ${_strata_gpu_include_directories})
-  target_link_libraries(strata-q36ref PRIVATE strata_kernels strata_warnings ${_strata_gpu_runtime_target})
-  # the engine path for the same family (serve protocol, prompt chunks, decode graph): src/qwen35/q36_engine.cu, a
-  # library that `strata` switches to for a qwen35moe model (the family switch at the top of its main) and that
-  # strata-q36 wraps on its own
-  add_library(strata_qwen35 STATIC src/qwen35/q36_engine.cu)
-  target_include_directories(strata_qwen35 PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include PRIVATE ${_strata_gpu_include_directories})
-  target_link_libraries(strata_qwen35 PRIVATE strata_prefill strata_kernels strata_warnings ${_strata_gpu_runtime_target})
-  if(STRATA_NATIVE_EXPERTS)
-    # the hybrid mode (experts that do not all fit in VRAM): the CPU expert pool on ggml-cpu's arithmetic
-    target_link_libraries(strata_qwen35 PRIVATE strata_kernels_cpu)
-    target_compile_definitions(strata_qwen35 PRIVATE STRATA_Q36_CPU_POOL=1)
-  endif()
-  add_executable(strata-q36 src/qwen35/q36_main.cpp)
-  target_link_libraries(strata-q36 PRIVATE strata_qwen35 ${_strata_gpu_runtime_target})
-  target_link_libraries(strata PRIVATE strata_qwen35)
-  target_compile_definitions(strata PRIVATE STRATA_HAVE_QWEN35=1)
 
   if(STRATA_ENABLE_HIP)
     enable_testing()
@@ -1211,7 +1170,7 @@ if(STRATA_ENABLE_CUDA OR STRATA_ENABLE_HIP)
   target_link_libraries(kv_q8_parity PRIVATE strata_kernels ${_strata_gpu_runtime_target})
   add_test(NAME kv_q8_parity COMMAND kv_q8_parity)
 
-  # KV streaming (docs/kv-streaming-design.md): streamed vs resident attention, bitwise (GPU, synthetic, no model).
+  # KV streaming (the K/V streaming design): streamed vs resident attention, bitwise (GPU, synthetic, no model).
   add_executable(kv_stream_parity src/kernels/kv_stream_parity.cpp)
   target_include_directories(kv_stream_parity PRIVATE ${_strata_gpu_include_directories})
   target_link_libraries(kv_stream_parity PRIVATE strata_kernels ${_strata_gpu_runtime_target})
@@ -1452,6 +1411,11 @@ if(STRATA_NATIVE_EXPERTS)
   set(BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
   set(GGML_STATIC ON CACHE BOOL "" FORCE)
   set(GGML_CUDA OFF CACHE BOOL "" FORCE)
+  # ggml's CUDA backend can FetchContent NVIDIA's CCCL from a MUTABLE git tag with no hash, inside configure
+  # (third_party/llama.cpp/ggml/src/ggml-cuda/CMakeLists.txt). Nothing declares the option, so it was off only
+  # because the variable was undefined: one -DGGML_CUDA_CUB_3DOT2=ON would have turned the no-network build into
+  # an unpinned fetch. A download that is not pinned and verified does not happen.
+  set(GGML_CUDA_CUB_3DOT2 OFF CACHE BOOL "unpinned CCCL fetch: never" FORCE)
   set(GGML_OPENMP OFF CACHE BOOL "" FORCE)
   set(GGML_BACKEND_DL OFF CACHE BOOL "" FORCE)
   set(GGML_BUILD_TESTS OFF CACHE BOOL "" FORCE)
@@ -1484,7 +1448,7 @@ if(STRATA_NATIVE_EXPERTS)
     message(FATAL_ERROR "ggml was not found in ${STRATA_GGML_DIR}: run `git submodule update --init` first")
   endif()
   # UnbiasedStrata: the submodule is the fork robertkarl/llama.cpp, branch UnbiasedStrata (upstream's pin plus the
-  # tool-call parser commits UPSTREAM.md lists). Nothing is patched at configure; the submodule's tree is what is built.
+  # tool-call parser commits PROVENANCE.md lists). Nothing is patched at configure; the submodule's tree is what is built.
   add_subdirectory(${STRATA_GGML_DIR}/ggml ${CMAKE_BINARY_DIR}/ggml EXCLUDE_FROM_ALL)
   # part of strata_kernels_cpu (the pool calls these and they call its CPU probe: one library, so GNU ld's
   # one-pass static linking has no cycle to resolve)
@@ -1602,7 +1566,7 @@ if(STRATA_NATIVE_EXPERTS)
                 src/prefill/mmq_nvfp4_w4a8.cu
                 src/prefill/ggml_cuda_host.cu ${_strata_mmq}/quantize.cu)
     # q8_0: the drafter's matrices (E-9); STRATA_ORCA_Q4KS_MMQ adds q5_0 (#296, in _strata_mmq_types), and
-    # STRATA_MMQ_KQUANTS q4_k q5_k q5_1 q6_k, the experts of Unsloth's UD-Q4/Q5/Q6_K_XL (docs/QUANTS.md; the dispatch
+    # STRATA_MMQ_KQUANTS q4_k q5_k q5_1 q6_k, the experts of Unsloth's UD-Q4/Q5/Q6_K_XL (the dispatch
     # follows eddoursul/Strata 7706c1b).  MODEL-UPDATE Phase 1: on CUDA they are a library of their own, strata_kq
     # (below), loaded only for a model with these experts: the engine loads every kernel of its own binary at start
     # (CUDA_MODULE_LOADING=EAGER), and these four took ~3.8 MB of VRAM (3 expert slots of IQ3_XXS on a P100) from every
@@ -1851,7 +1815,7 @@ if(STRATA_NATIVE_EXPERTS)
     target_include_directories(q8_gemv_bench PRIVATE ${_strata_gpu_include_directories})
     target_link_libraries(q8_gemv_bench PRIVATE strata_kernels ${_strata_gpu_runtime_target})
     if(STRATA_ENABLE_CUDA)
-      # EXPDEC (docs/EXPERTDEC.md): the grouped experts' default kernels against STRATA_EXPDEC=1 at T = 1..4, bit for bit
+      # EXPDEC: the grouped experts' default kernels against STRATA_EXPDEC=1 at T = 1..4, bit for bit
       # and in microseconds, on synthetic blobs read cold from DRAM
       add_executable(expdec_bench EXCLUDE_FROM_ALL src/kernels/expdec_bench.cpp)
       target_include_directories(expdec_bench PRIVATE ${_strata_gpu_include_directories})
@@ -1867,7 +1831,7 @@ if(STRATA_NATIVE_EXPERTS)
       # noise, not a kernel bug -- see the PR).
       # q4_0/q4_0 and q4_0/q4_1: a plain llama-quantize Q4_0 file (bartowski's Qwen3.8-Flash-Next-Q4_0: gate/up Q4_0,
       # down Q4_0 on 42 layers and Q4_1 on 6)
-      # q6_K/q8_0: Unsloth UD-Q6_K_XL gate/up Q6_K with Q8_0 down (docs/UNSLOTH_Q6.md). Layer 2 is q8_0/q8_0, already listed.
+      # q6_K/q8_0: Unsloth UD-Q6_K_XL gate/up Q6_K with Q8_0 down. Layer 2 is q8_0/q8_0, already listed.
       set(_strata_parity_pairs q4_K/q5_1 q4_K/q8_0 q5_K/q8_0 q8_0/q8_0 q4_K/q5_0 q5_0/q8_0 q4_0/q4_0 q4_0/q4_1)
       if(STRATA_Q6K_EXPERTS)
         list(APPEND _strata_parity_pairs q6_K/q8_0)
@@ -1885,7 +1849,7 @@ if(STRATA_NATIVE_EXPERTS)
       add_test(NAME native_expert_parity_bf16_embd COMMAND native_expert_parity --bf16-embd)
     endif()
   endif()
-  # #296's real-weight checks (OrcaRouter Q4_K_S files; docs/ORCA_Q4_K_S.md) - test programs, not part of a release
+  # #296's real-weight checks (OrcaRouter Q4_K_S files) - test programs, not part of a release
   if(STRATA_ENABLE_CUDA AND STRATA_BUILD_TESTS)
     add_executable(ple_q5_parity src/kernels/ple_q5_parity.cpp)
     target_link_libraries(ple_q5_parity PRIVATE strata_kernels strata_artifact ggml-base ${_strata_gpu_runtime_target})
@@ -1997,261 +1961,13 @@ if(STRATA_BUILD_TESTS)
   add_test(NAME aux_cpus_test COMMAND aux_cpus_test)
 endif()
 
-# ---- strata-poly: GLM 5.3 Flash (llama.cpp's glm5-next), read from its GGUF ----
-#
-# A second engine beside `strata`.  It shares the quantized matvec kernels and the GGUF reader, and takes the
-# CPU experts' dot products from ggml-cpu.  On HIP it is the same CUDA-shaped code through the hip_compat headers
-# (the wave32 RDNA backend; gfx906's wave64 compat layer is not supported here).
-if(STRATA_NATIVE_EXPERTS AND (STRATA_ENABLE_CUDA OR STRATA_ENABLE_HIP) AND NOT STRATA_HIP_GFX906)
-  # The prompt path's quantized products: llama.cpp's MMQ kernels (ggml-cuda, MIT) for the types the model's
-  # GGUFs keep their matrices in (the list in src/poly/mmq.cu), from the checkout strata_mmq is compiled from and
-  # with the same host symbols.  A library of its own, so that what `strata` multiplies with MMQ stays as it is.
-  if(NOT _strata_mmq)   # a HIP build without STRATA_PREFILL_MMQ has not set these up yet
-    if(STRATA_GGML_DIR)
-      set(_strata_gg ${STRATA_GGML_DIR}/ggml)
-    else()
-      set(_strata_gg ${strata_llamacpp_SOURCE_DIR}/ggml)
-    endif()
-    set(_strata_mmq ${_strata_gg}/src/ggml-cuda)
-  endif()
-  set(_strata_poly_mmq_instances "")
-  foreach(_t q4_0 q4_1 q5_0 q5_1 q8_0 q2_k q3_k q4_k q5_k q6_k iq1_s iq2_xxs iq2_xs iq2_s iq3_xxs iq3_s iq4_nl
-             iq4_xs)
-    list(APPEND _strata_poly_mmq_instances ${_strata_mmq}/template-instances/mmq-instance-${_t}.cu)
-  endforeach()
-  # MXFP4: on RTX 50 llama.cpp's tiles use the FP4 MMA with block scales, which exists only in the arch-specific
-  # target, so on CUDA its instance alone is built with 12x -> 12xa, as Strata's W4A4 unit is.  A Blackwell other
-  # than 12.0 has no image of it, and Mmq::fits() leaves MXFP4 out there.
-  set(_strata_poly_mxfp4 ${_strata_mmq}/template-instances/mmq-instance-mxfp4.cu)
-  if(STRATA_ENABLE_HIP)
-    list(APPEND _strata_poly_mmq_instances ${_strata_poly_mxfp4})
-  else()
-    set(_strata_poly_fp4_archs ${CMAKE_CUDA_ARCHITECTURES})
-    list(TRANSFORM _strata_poly_fp4_archs REPLACE "^(12[0-9])$" "\\1a")
-    list(TRANSFORM _strata_poly_fp4_archs REPLACE "^(12[0-9])-(real|virtual)$" "\\1a-\\2")
-    add_library(strata_poly_mmq_mxfp4 OBJECT ${_strata_poly_mxfp4})
-    set_target_properties(strata_poly_mmq_mxfp4 PROPERTIES CUDA_ARCHITECTURES "${_strata_poly_fp4_archs}")
-    target_include_directories(strata_poly_mmq_mxfp4 PRIVATE ${_strata_gg}/include ${_strata_gg}/src ${_strata_mmq})
-    target_compile_options(strata_poly_mmq_mxfp4 PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:--extended-lambda -use_fast_math>)
-    if(MSVC)
-      target_compile_options(strata_poly_mmq_mxfp4 PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:-Xcompiler=/bigobj>)
-    endif()
-    list(APPEND _strata_poly_mmq_instances $<TARGET_OBJECTS:strata_poly_mmq_mxfp4>)
-  endif()
-  if(STRATA_ENABLE_HIP)
-    # CMake does not infer HIP from the .cu suffixes outside src/ (and drops a .cu source it has no language
-    # for), and ggml's MMQ sources take its native HIP path (vendors/hip.h) instead of the hip_compat headers,
-    # as strata_mmq's does.
-    set_source_files_properties(${_strata_mmq}/quantize.cu ${_strata_poly_mmq_instances} PROPERTIES LANGUAGE HIP)
-  endif()
-  add_library(strata_poly_mmq STATIC src/poly/mmq.cu src/prefill/ggml_cuda_host.cu ${_strata_mmq}/quantize.cu
-              ${_strata_poly_mmq_instances})
-  target_include_directories(strata_poly_mmq PRIVATE ${_strata_gg}/include ${_strata_gg}/src ${_strata_mmq}
-                                                    ${CMAKE_CURRENT_SOURCE_DIR}/include
-                                                    ${CMAKE_CURRENT_SOURCE_DIR}/src/prefill)
-  # STRATA_POLY_MMQ_TAB: the pointer-table kernels (src/prefill/moe_mmq_tab.cuh) for the types above but MXFP4, one
-  # TU each as for strata_mmq, under the same fingerprint of mmq.cuh
-  if(STRATA_POLY_MMQ_TAB AND STRATA_ENABLE_CUDA)
-    strata_mmq_tab_fingerprint(${_strata_mmq}/mmq.cuh _strata_poly_tab_hash)
-    if(_strata_poly_tab_hash AND _strata_poly_tab_hash IN_LIST _strata_mmq_tab_known)
-      set(_strata_tab_cuh ${CMAKE_CURRENT_SOURCE_DIR}/src/prefill/moe_mmq_tab.cuh)
-      set(_strata_poly_tab_types q4_0 q4_1 q5_0 q5_1 q8_0 q2_k q3_k q4_k q5_k q6_k iq1_s iq2_xxs iq2_xs iq2_s
-                                 iq3_xxs iq3_s iq4_nl iq4_xs)
-      foreach(_t IN LISTS _strata_poly_tab_types)
-        string(TOUPPER ${_t} _strata_tab_T)
-        configure_file(src/prefill/mmq_tab_instance.cu.in ${CMAKE_BINARY_DIR}/poly_mmq_tab/mmq-tab-${_t}.cu @ONLY)
-        target_sources(strata_poly_mmq PRIVATE ${CMAKE_BINARY_DIR}/poly_mmq_tab/mmq-tab-${_t}.cu)
-      endforeach()
-      target_compile_definitions(strata_poly_mmq PRIVATE STRATA_POLY_MMQ_TAB=1)
-      message(STATUS "STRATA_POLY_MMQ_TAB on: pointer-table MMQ for strata-poly's cached experts")
-    else()
-      message(STATUS "STRATA_POLY_MMQ_TAB off: mmq.cuh differs from the mirrored scheduler (${_strata_poly_tab_hash})")
-    endif()
-  endif()
-  target_compile_options(strata_poly_mmq PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:--extended-lambda -use_fast_math>)
-  if(MSVC)
-    target_compile_options(strata_poly_mmq PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:-Xcompiler=/bigobj>)
-  endif()
-  if(STRATA_ENABLE_HIP)
-    target_compile_definitions(strata_poly_mmq PRIVATE GGML_USE_HIP=1)
-    target_link_libraries(strata_poly_mmq PUBLIC ggml-base hip::host)
-  else()
-    target_link_libraries(strata_poly_mmq PUBLIC ggml-base ${_strata_gpu_runtime_target})
-  endif()
-
-  add_executable(strata-poly src/poly/main.cpp src/poly/engine.cpp src/poly/glm5next.cpp src/poly/qwen35.cpp
-                            src/poly/gemma4.cpp src/poly/deepseek4.cpp src/poly/lfm2moe.cpp src/poly/cpu_experts.cpp
-                            src/poly/kernels.cu src/poly/kernels_dsv4.cu src/core/conversation_memory.cpp)
-  target_include_directories(strata-poly PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include ${_strata_gpu_include_directories})
-  # the driver's virtual memory calls: the attention caches grow with the conversation; on HIP they are HIP's
-  # memory management calls, which the HIP runtime itself provides (hip_compat/cuda.h)
-  if(STRATA_ENABLE_HIP)
-    set(_strata_poly_driver "")
-  else()
-    set(_strata_poly_driver CUDA::cuda_driver)
-  endif()
-  target_link_libraries(strata-poly PRIVATE strata_poly_mmq strata_kernels strata_spec ggml-cpu ggml-base
-                                           ${_strata_gpu_blas_target} ${_strata_gpu_runtime_target}
-                                           ${_strata_poly_driver}
-                                           Threads::Threads)
-  # needs the model file, so it is run by hand: poly_expert_parity MODEL.gguf
-  add_executable(poly_expert_parity src/poly/expert_parity.cpp src/poly/cpu_experts.cpp src/poly/kernels.cu)
-  target_include_directories(poly_expert_parity PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include
-                                                       ${_strata_gpu_include_directories})
-  target_link_libraries(poly_expert_parity PRIVATE strata_poly_mmq strata_kernels ggml-cpu ggml-base
-                                                  ${_strata_gpu_blas_target} ${_strata_gpu_runtime_target}
-                                                  Threads::Threads)
-  # a read with the draft block repeats bit for bit; needs the model file, so it is run by hand:
-  # poly_draft_race_test MODEL.gguf [RUNS] [LAYER_SPLIT]
-  add_executable(poly_draft_race_test src/poly/draft_race_test.cpp src/poly/engine.cpp src/poly/glm5next.cpp
-                                      src/poly/qwen35.cpp src/poly/gemma4.cpp src/poly/deepseek4.cpp
-                                      src/poly/lfm2moe.cpp src/poly/cpu_experts.cpp src/poly/kernels.cu src/poly/kernels_dsv4.cu
-                                      src/core/conversation_memory.cpp)
-  target_include_directories(poly_draft_race_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include
-                                                         ${_strata_gpu_include_directories})
-  target_link_libraries(poly_draft_race_test PRIVATE strata_poly_mmq strata_kernels strata_spec ggml-cpu ggml-base
-                                                    ${_strata_gpu_blas_target} ${_strata_gpu_runtime_target}
-                                                    ${_strata_poly_driver} Threads::Threads)
-  # a prompt batch's routing on the card against the hosts' routing; needs a card, so it is run by hand
-  add_executable(poly_route_test src/poly/route_test.cu src/poly/kernels.cu)
-  target_include_directories(poly_route_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include
-                                                    ${_strata_gpu_include_directories})
-  target_link_libraries(poly_route_test PRIVATE ${_strata_gpu_blas_target} ${_strata_gpu_runtime_target})
-  # the fused residual sum, RMS norm and Q8_1 quantization against the three launches; needs a card, run by hand
-  add_executable(poly_norm_q8_test src/poly/norm_q8_test.cu src/poly/kernels.cu)
-  target_include_directories(poly_norm_q8_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include
-                                                      ${_strata_gpu_include_directories})
-  target_link_libraries(poly_norm_q8_test PRIVATE strata_kernels ${_strata_gpu_blas_target}
-                                                  ${_strata_gpu_runtime_target})
-  # a prompt batch's products with few outputs against the same sums on the host; needs a card, run by hand
-  add_executable(poly_gemm_small_test src/poly/gemm_small_test.cu src/poly/kernels.cu)
-  target_include_directories(poly_gemm_small_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include
-                                                         ${_strata_gpu_include_directories})
-  target_link_libraries(poly_gemm_small_test PRIVATE ${_strata_gpu_blas_target} ${_strata_gpu_runtime_target})
-  # attend()'s blocks of rows against its other kernels and itself; needs a card, so it is run by hand
-  add_executable(poly_attend_test src/poly/attend_test.cu src/poly/kernels.cu)
-  target_include_directories(poly_attend_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include
-                                                     ${_strata_gpu_include_directories})
-  target_link_libraries(poly_attend_test PRIVATE ${_strata_gpu_blas_target} ${_strata_gpu_runtime_target})
-  # LFM2's short convolution against the same arithmetic on the host; needs a card, so it is run by hand
-  add_executable(poly_shortconv_test src/poly/shortconv_test.cu src/poly/kernels.cu)
-  target_include_directories(poly_shortconv_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include
-                                                        ${_strata_gpu_include_directories})
-  target_link_libraries(poly_shortconv_test PRIVATE ${_strata_gpu_blas_target} ${_strata_gpu_runtime_target})
-  # DeepSeek V4's kernels against the same arithmetic on the host; needs a card, so it is run by hand
-  add_executable(poly_dsv4_test src/poly/dsv4_test.cu src/poly/kernels_dsv4.cu)
-  target_include_directories(poly_dsv4_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include
-                                                   ${_strata_gpu_include_directories})
-  target_link_libraries(poly_dsv4_test PRIVATE ${_strata_gpu_runtime_target})
-  # the pool of the CPU experts, without a model
-  add_executable(poly_workers_test src/poly/workers_test.cpp src/poly/cpu_experts.cpp)
-  target_include_directories(poly_workers_test PRIVATE ${_strata_gg}/include)
-  target_link_libraries(poly_workers_test PRIVATE ggml-cpu ggml-base Threads::Threads)
-  add_test(NAME poly_workers_test COMMAND poly_workers_test)
-  # the card's MXFP4 product against ggml's dequantizer on random blocks, without a model; needs a card, run by hand
-  add_executable(poly_mxfp4_test src/poly/mxfp4_test.cu)
-  target_include_directories(poly_mxfp4_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include ${_strata_gg}/include
-                                                    ${_strata_gpu_include_directories})
-  target_link_libraries(poly_mxfp4_test PRIVATE strata_kernels ggml-base ${_strata_gpu_runtime_target})
-  # the Q8_0 KV cache kernels (store_q8 / store_q8_at) against a host reference (GPU, synthetic, no model)
-  if(STRATA_BUILD_TESTS)
-    add_executable(poly_kv_q8_test src/poly/kv_q8_test.cpp src/poly/kernels.cu)
-    target_include_directories(poly_kv_q8_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include
-                                                       ${_strata_gpu_include_directories})
-    target_link_libraries(poly_kv_q8_test PRIVATE ${_strata_gpu_blas_target} ${_strata_gpu_runtime_target}
-                                                  Threads::Threads)
-    add_test(NAME poly_kv_q8_test COMMAND poly_kv_q8_test)
-  endif()
-endif()
-
-# ---- strata-dsv41: DeepSeek-V4.1-Flash, from Strata v0.2.4 (UPSTREAM.md "DeepSeek-V4.1 engine") ----------------
-#
-# The third engine.  Imported from Niko1221/Strata v0.2.4 (src/dsv41, include/strata/dsv41, tests/dsv41, tools/dsv41,
-# data/dsv41; itself a port of Project Maya's maya-ds4, MIT, third_party/project-maya/NOTICE.md).  Upstream's target
-# block as it is, but for: no FetchContent (ggml.h / ggml-cpu.h come through strata_kernels_cpu's ggml-cpu link from the
-# submodule), and no STRATA_BUILD_DSV41 default of OFF - the Makefile turns it on, it is one of the engines this fork
-# builds.  The vendored kernels live in strata::dsv41k, so no symbol is shared with strata_kernels.
-option(STRATA_BUILD_DSV41 "Build the DeepSeek-V4.1 engine path (strata-dsv41)" OFF)
-if(STRATA_BUILD_DSV41 AND STRATA_NATIVE_EXPERTS AND (STRATA_ENABLE_CUDA OR STRATA_ENABLE_HIP) AND NOT STRATA_HIP_GFX906)
-  add_library(strata_dsv41_kernels STATIC src/dsv41/vendor/exl3.cu src/dsv41/vendor/sampler.cu src/dsv41/vendor/moe_win.cu
-              src/dsv41/vendor/exl3_cpu.cpp)
-  if(NOT STRATA_ENABLE_HIP)   # (the pre-sm_80 NVIDIA decode kernels exl3.cu dispatches to)
-    target_sources(strata_dsv41_kernels PRIVATE src/dsv41/vendor/exl3_legacy.cu)
-  endif()
-  target_include_directories(strata_dsv41_kernels PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include ${_strata_gpu_include_directories})
-  target_link_libraries(strata_dsv41_kernels PUBLIC ${_strata_gpu_runtime_target})
-  add_executable(strata-dsv41 src/dsv41/ds4_main.cpp src/dsv41/ds4_model.cu src/dsv41/ds4_kernels.cu src/dsv41/ds4_vision.cu
-                 src/dsv41/ds4_gguf.cu src/dsv41/ds4_gguf_cpu.cpp src/dsv41/ds4_iq.cu src/dsv41/ds4_iq_cpu.cpp
-                 src/dsv41/ds4_tq.cu src/dsv41/ds4_tq_cpu.cpp src/dsv41/ds4_gg_cpu.cpp src/dsv41/ds4_packinfo.cpp)
-  # the commit the binary was built from, readable with --version (set -DSTRATA_BUILD_ID=... for a tree without .git)
-  if(NOT STRATA_BUILD_ID AND EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/BUILD_ID)   # (a git archive has no .git: the packer writes the commit here)
-    file(STRINGS ${CMAKE_CURRENT_SOURCE_DIR}/BUILD_ID STRATA_BUILD_ID LIMIT_COUNT 1)
-  endif()
-  if(NOT STRATA_BUILD_ID)
-    execute_process(COMMAND git -C ${CMAKE_CURRENT_SOURCE_DIR} rev-parse --short=9 HEAD OUTPUT_VARIABLE STRATA_BUILD_ID
-                    OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET)
-  endif()
-  if(NOT STRATA_BUILD_ID)
-    set(STRATA_BUILD_ID unknown)
-  endif()
-  set_source_files_properties(src/dsv41/ds4_main.cpp PROPERTIES COMPILE_DEFINITIONS "DS4_BUILD_ID=\"${STRATA_BUILD_ID}\"")
-  target_include_directories(strata-dsv41 PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include ${_strata_gpu_include_directories}
-                             ${CMAKE_CURRENT_SOURCE_DIR}/third_party/ggml)
-  target_link_libraries(strata-dsv41 PRIVATE strata_dsv41_kernels ${_strata_gpu_runtime_target} ${_strata_gpu_blas_target})
-  find_package(Threads REQUIRED)
-  target_link_libraries(strata-dsv41 PRIVATE Threads::Threads)
-  if(WIN32 AND STRATA_ENABLE_HIP)
-    target_link_libraries(strata-dsv41 PRIVATE strata_core)
-  endif()
-  # Strata's CPU kernels: the ggml-cpu lane for the GGUF i-quant experts (ds4_gg_cpu.cpp: iq256x_rows / iq512x_rows) and the
-  # trellis lane (tq_cpu.hpp) - the lane the IST-DAS sets' experts beyond VRAM are computed on
-  target_link_libraries(strata-dsv41 PRIVATE strata_kernels_cpu)
-  target_compile_definitions(strata-dsv41 PRIVATE STRATA_DSV41_TQ_CPU=1)
-  # the CPU lane's ggml-type rows: ggml-cpu's dots against Strata's AVX2 i-quant rows (bits and GB/s); no GPU, no model
-  add_executable(ds4_gg_bench tests/dsv41/gg_dot_bench.cpp src/dsv41/ds4_gg_cpu.cpp)
-  target_include_directories(ds4_gg_bench PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include ${CMAKE_CURRENT_SOURCE_DIR}/src/dsv41
-                             ${CMAKE_CURRENT_SOURCE_DIR}/third_party/ggml)
-  target_link_libraries(ds4_gg_bench PRIVATE strata_kernels_cpu Threads::Threads)
-  target_compile_definitions(ds4_gg_bench PRIVATE STRATA_DSV41_TQ_CPU=1)
-  # the trellis experts (device kernels ds4_tq.cu, CPU lane ds4_tq_cpu.cpp) against a double reference; needs a GPU, no model
-  if(STRATA_ENABLE_HIP)
-    set(_ds4_test_lang HIP)
-  else()
-    set(_ds4_test_lang CUDA)
-  endif()
-  set_source_files_properties(tests/dsv41/tq_expert_test.cpp PROPERTIES LANGUAGE ${_ds4_test_lang})
-  add_executable(ds4_tq_test tests/dsv41/tq_expert_test.cpp src/dsv41/ds4_tq.cu src/dsv41/ds4_iq.cu src/dsv41/ds4_tq_cpu.cpp
-                 src/dsv41/ds4_iq_cpu.cpp src/dsv41/ds4_gg_cpu.cpp tools/trellis/tqenc.cpp)
-  target_include_directories(ds4_tq_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include ${_strata_gpu_include_directories}
-                             ${CMAKE_CURRENT_SOURCE_DIR}/third_party/ggml ${CMAKE_CURRENT_SOURCE_DIR}/src/kernels/cpu)
-  target_link_libraries(ds4_tq_test PRIVATE strata_kernels_cpu ${_strata_gpu_runtime_target} Threads::Threads)
-  target_compile_definitions(ds4_tq_test PRIVATE STRATA_DSV41_TQ_CPU=1)
-  # the i-quant experts (ds4_iq.cu) against ggml's own decode of the same blocks + a double reference, device and CPU
-  # lane, for every type the device takes: the gate a new type has to pass before the engine uses it
-  set_source_files_properties(tests/dsv41/iq_expert_test.cpp PROPERTIES LANGUAGE ${_ds4_test_lang})
-  add_executable(ds4_iq_test tests/dsv41/iq_expert_test.cpp src/dsv41/ds4_iq.cu src/dsv41/ds4_iq_cpu.cpp
-                 src/dsv41/ds4_gg_cpu.cpp src/dsv41/ds4_tq.cu src/dsv41/ds4_tq_cpu.cpp)
-  target_include_directories(ds4_iq_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include ${_strata_gpu_include_directories}
-                             ${CMAKE_CURRENT_SOURCE_DIR}/third_party/ggml ${CMAKE_CURRENT_SOURCE_DIR}/src/kernels/cpu)
-  target_link_libraries(ds4_iq_test PRIVATE strata_kernels_cpu ${_strata_gpu_runtime_target} Threads::Threads)
-  target_compile_definitions(ds4_iq_test PRIVATE STRATA_DSV41_TQ_CPU=1)
-  # the kept conversations' .meta file and prefix matching (ds4_slotmeta.hpp): no GPU, no model
-  add_executable(ds4_slot_test tests/dsv41/slot_test.cpp)
-  target_include_directories(ds4_slot_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src/dsv41)
-  target_compile_features(ds4_slot_test PRIVATE cxx_std_17)
-  if(STRATA_ENABLE_HIP)
-    foreach(_t strata_dsv41_kernels strata-dsv41 ds4_tq_test ds4_iq_test)
-      target_compile_options(${_t} PRIVATE "$<$<COMPILE_LANGUAGE:HIP,CXX>:SHELL:-include ${CMAKE_CURRENT_SOURCE_DIR}/include/strata/dsv41/hip_extra.h>")
-    endforeach()
-  endif()
-endif()
 
 # ---- UnbiasedStrata: llama.cpp's libraries for the C++ front end (frontend/) ------------------------------------
 # The front end takes its tokenizer (llama), its Jinja chat templates, chat-format parsers and HTTP library (common,
 # cpp-httplib) and its image encoder (mtmd) from the same pinned checkout that ggml comes from.  ggml is configured
 # above, so llama.cpp's build reuses those targets.  Nothing here downloads: LLAMA_USE_PREBUILT_UI is off and
 # LLAMA_CURL is a no-op at this pin.
-option(STRATA_FRONTEND "Build the C++ front end (unbiased-strata); needs no CUDA, so it also builds on a laptop" ON)
+option(STRATA_FRONTEND "Build the C++ front end (aegis); needs no CUDA, so it also builds on a laptop" ON)
 if(STRATA_FRONTEND AND STRATA_NATIVE_EXPERTS)
   set(LLAMA_BUILD_COMMON ON CACHE BOOL "" FORCE)
   set(LLAMA_BUILD_MTMD ON CACHE BOOL "" FORCE)
@@ -2278,16 +1994,24 @@ if(STRATA_FRONTEND AND STRATA_NATIVE_EXPERTS)
   target_link_libraries(strata_llama_server PUBLIC llama-common llama mtmd cpp-httplib Threads::Threads)
   target_compile_features(strata_llama_server PUBLIC cxx_std_17)
 
-  add_executable(unbiased-strata frontend/main.cpp frontend/strata_context.cpp)
-  target_include_directories(unbiased-strata PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/frontend)
-  target_link_libraries(unbiased-strata PRIVATE strata_llama_server)
-  target_compile_features(unbiased-strata PRIVATE cxx_std_20)
+  add_executable(aegis frontend/main.cpp frontend/strata_context.cpp frontend/strata_sandbox.cpp)
+  target_include_directories(aegis PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/frontend)
+  target_link_libraries(aegis PRIVATE strata_llama_server)
+  target_compile_features(aegis PRIVATE cxx_std_20)
 
   # The engine adapter against the fake engine (frontend/tests/fake-engine.py): no GPU, no model, no llama.cpp.
   # `make test` builds and runs it, then frontend/tests/e2e.sh against the binary above.
-  add_executable(engine_test EXCLUDE_FROM_ALL frontend/tests/engine_test.cpp)
+  # engine.hpp installs the sandbox between fork and exec, so anything that includes it needs the
+  # implementation too.
+  add_executable(engine_test EXCLUDE_FROM_ALL frontend/tests/engine_test.cpp frontend/strata_sandbox.cpp)
   target_include_directories(engine_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/frontend)
   target_compile_features(engine_test PRIVATE cxx_std_20)
+  # The containment of the engine child (frontend/strata_sandbox.cpp): forks, applies the sandbox and re-execs
+  # itself as a probe.  No GPU, no model, no llama.cpp, so it runs in CI.  No new link library: the filter is
+  # hand-written BPF and Landlock has no glibc wrapper, so both are raw syscalls.
+  add_executable(sandbox_test EXCLUDE_FROM_ALL frontend/tests/sandbox_test.cpp frontend/strata_sandbox.cpp)
+  target_include_directories(sandbox_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/frontend)
+  target_compile_features(sandbox_test PRIVATE cxx_std_20)
 
   # The literal marking (frontend/literals.hpp) over llama.cpp's vendored nlohmann json, which has the same interface
   # as common_json: no model, no llama.cpp library.

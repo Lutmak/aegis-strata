@@ -1,7 +1,7 @@
-// UnbiasedStrata: the front end's program. Mirrors llama.cpp's tools/server/server.cpp without router mode, MCP,
+// aegis-strata: the front end's program. Mirrors llama.cpp's tools/server/server.cpp without router mode, MCP,
 // server-side tools, the web UI and model downloads.
 //
-//   unbiased-strata --engine build/bin/strata-poly -m model.gguf [llama-server options] -- <engine options>
+//   aegis --engine build/bin/strata -m model.gguf [llama-server options] -- <engine options>
 //
 // Options before `--` are llama-server's (common_params_parse): -m/--model gives the GGUF the vocabulary and chat
 // template are read from, --host/--port/--api-key/--threads-http the listener, --temp/--top-k/... the sampling
@@ -46,7 +46,7 @@ void signal_handler(int signal) {
 
 void usage() {
     std::fprintf(stderr,
-        "usage: unbiased-strata --engine <strata|strata-poly|path> -m <model.gguf> [llama-server options] -- <engine options>\n"
+        "usage: aegis --engine <strata|path> -m <model.gguf> [llama-server options] -- <engine options>\n"
         "\n"
         "  --engine PATH          the engine binary; a bare name is looked up beside this program\n"
         "  -m, --model FILE       the GGUF the vocabulary and chat template are read from (no tensors are loaded)\n"
@@ -58,11 +58,18 @@ void usage() {
         "                         sizes its expert cache only if the encoder loads first; for cards with room\n"
         "  --picture-cache N      keep the encoded rows of the last N pictures (default 64, up to 1 GiB) so a chat\n"
         "                         that resends its pictures every turn encodes each once; 0 turns it off\n"
+        "  --sandbox-allow-read PATH   also let the engine read this path (repeatable). The engine's own\n"
+        "                         arguments that name an existing path are allowed automatically\n"
+        "  --sandbox-allow-write PATH  also let it write there (repeatable): --expert-profile-save,\n"
+        "                         --prompt-cache-root, --shared-expert-arena outside /dev/shm\n"
+        "  --no-sandbox           run the engine uncontained: it regains the network and your whole home\n"
+        "                         directory. Only for a kernel without seccomp or Landlock\n"
         "  --                     everything after it is passed to the engine; --serve is added\n"
         "\n"
-        "example (Qwen3.6-35B-A3B from its GGUF):\n"
-        "  unbiased-strata --engine strata-poly -m Qwen3.6-35B-A3B-UD-Q3_K_M.gguf --port 8080 \\\n"
-        "      -- --model Qwen3.6-35B-A3B-UD-Q3_K_M.gguf --max-context 32768\n");
+        "example (Qwen3.8-Flash-Next, 12 GB card):\n"
+        "  aegis --engine strata -m model-00001-of-00002.gguf --port 8080 \\\n"
+        "      -- --pack PACK --native model-00001-of-00002.gguf --ple-gguf model-00002-of-00002.gguf \\\n"
+        "         --mtp MTP/rt --max-context 32768 --kv int8 --kv-grow --ple-io direct --gpu 0\n");
 }
 
 std::string self_dir() {
@@ -95,6 +102,8 @@ int main(int argc, char ** argv) {
     std::vector<char *> llama_argv;
     bool mmproj_gpu = false; // the vision encoder on the card: only where the engine leaves room (a 48 GB card)
     long picture_cache = 64; // --picture-cache N: encoded pictures kept for the turns that resend them
+    bool sandbox = true;     // the engine child is contained unless --no-sandbox
+    std::vector<std::string> sandbox_read, sandbox_write;
     llama_argv.push_back(argv[0]);
     for (int i = 1; i < argc; ++i) {
         const std::string a = argv[i];
@@ -123,6 +132,20 @@ int main(int argc, char ** argv) {
             if (picture_cache < 0) { usage(); return 2; }
             continue;
         }
+        if (a == "--no-sandbox") {
+            sandbox = false;
+            continue;
+        }
+        if (a == "--sandbox-allow-read") {
+            if (i + 1 >= argc) { usage(); return 2; }
+            sandbox_read.push_back(argv[++i]);
+            continue;
+        }
+        if (a == "--sandbox-allow-write") {
+            if (i + 1 >= argc) { usage(); return 2; }
+            sandbox_write.push_back(argv[++i]);
+            continue;
+        }
         llama_argv.push_back(argv[i]);
     }
     if (engine_exe.empty()) {
@@ -136,7 +159,7 @@ int main(int argc, char ** argv) {
         }
     }
     if (!file_exists(engine_exe)) {
-        std::fprintf(stderr, "unbiased-strata: engine not found or not executable: %s\n", engine_exe.c_str());
+        std::fprintf(stderr, "aegis: engine not found or not executable: %s\n", engine_exe.c_str());
         return 2;
     }
 
@@ -151,7 +174,7 @@ int main(int argc, char ** argv) {
     // encoder runs on the CPU unless --mmproj-gpu asks for the card (upstream PolyStrata's choice as well)
     params.mmproj_use_gpu = mmproj_gpu;
     if (params.model.path.empty()) {
-        std::fprintf(stderr, "unbiased-strata: -m <model.gguf> is required (the vocabulary and chat template come from it)\n");
+        std::fprintf(stderr, "aegis: -m <model.gguf> is required (the vocabulary and chat template come from it)\n");
         return 2;
     }
     auto model_name = params.model.get_name();
@@ -164,6 +187,18 @@ int main(int argc, char ** argv) {
 
     strata_context ctx_server;
     ctx_server.set_picture_cache((size_t) picture_cache, (size_t) 1 << 30);
+    ctx_server.set_sandbox(sandbox, sandbox_read, sandbox_write);
+    if (!sandbox) {
+        // stderr and not LOG_WRN on purpose: a log level must not be able to suppress this, and it is a
+        // framed block so that it survives being scrolled past.
+        std::fprintf(stderr,
+            "************************************************************************\n"
+            "*  SANDBOX IS OFF (--no-sandbox)                                       *\n"
+            "*  The engine child keeps network access and can read and write every  *\n"
+            "*  file you can, including ~/.ssh and your shell startup files.        *\n"
+            "*  Invariants 1 and 2 are not enforced in this configuration.          *\n"
+            "************************************************************************\n");
+    }
     server_http_context ctx_http;
     if (!ctx_http.init(params)) {
         SRV_ERR("%s", "failed to initialize HTTP server\n");
@@ -216,7 +251,8 @@ int main(int argc, char ** argv) {
     sigaction(SIGTERM, &sigint_action, NULL);
 
     // the engine's exit ends this process too, with a non-zero code, so a unit with Restart=on-failure brings both
-    // back. A replacement engine is not forked from this multithreaded process (UnbiasedStrata 1 main.cpp:873).
+    // back. A replacement engine is not forked from this multithreaded process -- upstream did that and it
+    // inherited the parent's threads.
     std::atomic<bool> engine_died{false};
     std::atomic<bool> stop_supervisor{false};
     std::thread supervisor([&]() {

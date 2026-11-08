@@ -1,5 +1,5 @@
 #!/bin/bash
-# Step 7 request shapes (PLAN.md section 9): the shapes a coding agent sends, against a live server. Raw responses in $OUT.
+# Request shapes: the shapes a coding agent sends, against a live server. Raw responses in $OUT.
 #   us2-shapes.sh http://127.0.0.1:18091 <outdir> <model-alias>
 set -u
 URL=$1; OUT=$2; MODEL=$3; mkdir -p "$OUT"

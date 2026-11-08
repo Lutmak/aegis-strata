@@ -1,8 +1,9 @@
-// UnbiasedStrata: the engine as a child process.
+// aegis-strata: the engine as a child process.
 //
-// The engines (`strata`, `strata-poly`) speak lines over stdin/stdout: `GEN <max_new> key=value... <id,id,...>` in,
-// `T <id>` per token, `PP`, `RESUME`, `DONE ...`, `ERR ...` out, `STOP` to cancel, `QUIT` to end (docs/BACKENDS.md,
-// "How a backend works"). This class owns one such child. It never blocks longer than the caller allows: the server
+// The engine (`strata`) speaks lines over stdin/stdout: `GEN <max_new> key=value... <id,id,...>` in,
+// `T <id>` per token, `PP`, `RESUME`, `DONE ...`, `ERR ...` out, `STOP` to cancel, `QUIT` to end. The protocol is
+// specified by the comments in this file and by frontend/tests/fake-engine.py, which implements it.
+// This class owns one such child. It never blocks longer than the caller allows: the server
 // loop polls it between tasks so a cancel from a disconnected client is seen within the poll interval.
 #pragma once
 
@@ -21,6 +22,8 @@
 #include <poll.h>
 #include <sys/wait.h>
 #include <unistd.h>
+
+#include "strata_sandbox.h"
 
 namespace strata_frontend {
 
@@ -74,13 +77,40 @@ public:
     Engine & operator=(const Engine &) = delete;
     ~Engine() { quit(); }
 
-    // fork+exec `executable` with `args` (args[0] is argv[0]). Must be called before any thread exists.
-    bool start(const std::string & executable, const std::vector<std::string> & args, std::string & err) {
-        int to_child[2], from_child[2];
+    // fork+exec `executable` with `args` (args[0] is argv[0]).
+    //
+    // This runs in a process that ALREADY has threads (the stream-session GC thread and whatever
+    // llama_backend_init started), so everything the child does between fork and exec must be
+    // async-signal-safe: no allocation, no stdio, no locks. That is why argv and the failure message are both
+    // built here, before the fork, and why the child reports with write(2) rather than fprintf -- the stdio
+    // lock could be held by another thread at the moment of the fork and would never be released.
+    //
+    // `sandbox`, when not null, is installed in the child between fork and exec: a network namespace, a Landlock
+    // allowlist and a seccomp filter (strata_sandbox.h). A sandbox that cannot be installed is a failure, never a
+    // warning, so the child reports it over `sb` and never reaches execv.
+    bool start(const std::string & executable, const std::vector<std::string> & args, std::string & err,
+               const strata_frontend::SandboxPlan * sandbox = nullptr) {
+        int to_child[2], from_child[2], sb[2] = {-1, -1};
         if (::pipe(to_child) != 0 || ::pipe(from_child) != 0) {
             err = std::string("pipe: ") + std::strerror(errno);
             return false;
         }
+        if (sandbox != nullptr && !pipe_cloexec(sb)) {
+            err = std::string("pipe: ") + std::strerror(errno);
+            ::close(to_child[0]); ::close(to_child[1]);
+            ::close(from_child[0]); ::close(from_child[1]);
+            return false;
+        }
+        // Built before the fork on purpose: the child must not allocate.
+        std::vector<char *> argv;
+        argv.reserve(args.size() + 1);
+        for (const std::string & a : args) {
+            argv.push_back(const_cast<char *>(a.c_str()));
+        }
+        argv.push_back(nullptr);
+        // Pre-formatted for the child: see the note above. errno cannot be known yet, so the parent reports the
+        // detail; this line only says which binary failed.
+        const std::string exec_failed = "aegis: could not start the engine " + executable + "\n";
         const pid_t pid = ::fork();
         if (pid < 0) {
             err = std::string("fork: ") + std::strerror(errno);
@@ -90,13 +120,11 @@ public:
             ::dup2(to_child[0], STDIN_FILENO);
             ::dup2(from_child[1], STDOUT_FILENO);
             ::close(to_child[0]); ::close(to_child[1]); ::close(from_child[0]); ::close(from_child[1]);
-            std::vector<char *> argv;
-            for (const std::string & a : args) {
-                argv.push_back(const_cast<char *>(a.c_str()));
+            if (sandbox != nullptr && strata_frontend::sandbox_apply(*sandbox, sb[1]) != 0) {
+                ::_exit(126);   // the record is already on `sb`; the parent turns it into the message
             }
-            argv.push_back(nullptr);
             ::execv(executable.c_str(), argv.data());
-            std::fprintf(stderr, "unbiased-strata: could not start the engine %s: %s\n", executable.c_str(), std::strerror(errno));
+            (void) ::write(STDERR_FILENO, exec_failed.data(), exec_failed.size());
             ::_exit(127);
         }
         pid_ = pid;
@@ -105,8 +133,50 @@ public:
         in_fd_  = to_child[1];
         out_fd_ = from_child[0];
         alive_  = true;
+        if (sb[1] >= 0) {
+            ::close(sb[1]);
+            strata_frontend::SandboxStage stage{};
+            int  err_no = 0;
+            bool fatal  = false;
+            bool        acknowledged = false;
+            std::string sandbox_err;
+            while (strata_frontend::sandbox_read_record(sb[0], stage, err_no, fatal)) {
+                if (stage == strata_frontend::SandboxStage::Installed) {
+                    // The positive acknowledgement. Its absence is a failure, so that a record lost for any
+                    // reason -- or a child killed by its own filter before it could report, which is what an
+                    // unexpected architecture does -- can never read as "fully contained".
+                    acknowledged   = true;
+                    sandbox_netns_ = err_no != 0;
+                    continue;
+                }
+                const std::string line =
+                    std::string(strata_frontend::sandbox_stage_name(stage)) + ": " + std::strerror(err_no);
+                if (fatal) {
+                    sandbox_err = "could not contain the engine: " + line;
+                } else {
+                    // stderr, not the log: a log level must not be able to hide that the strongest egress
+                    // control is absent and only a denylist remains.
+                    std::fprintf(stderr, "sandbox: %s; egress is denied by the syscall filter only\n", line.c_str());
+                }
+            }
+            ::close(sb[0]);
+            if (sandbox_err.empty() && !acknowledged && sandbox->enabled) {
+                sandbox_err = "could not contain the engine: it exec'd without confirming the sandbox was "
+                              "installed (no acknowledgement arrived over the sandbox pipe)";
+            }
+            if (!sandbox_err.empty()) {
+                err = sandbox_err;
+                quit();
+                return false;
+            }
+        }
         return true;
     }
+
+    // Whether the child actually got its own network namespace. False when the kernel refused one, which is a
+    // non-fatal degradation: egress is then denied by the syscall filter alone, which is a denylist. Only
+    // meaningful after a successful start() with a sandbox.
+    bool sandbox_netns() const { return sandbox_netns_; }
 
     // Reads start-up lines until READY. Loading a model takes minutes; `timeout_s` bounds the wait (<= 0: forever).
     // `READY <max_context> [stop]`: the context the engine actually allocated (its VRAM plan may lower the request);
@@ -262,6 +332,28 @@ public:
     }
 
 private:
+    bool sandbox_netns_ = false;   // set from the child's acknowledgement; false until it arrives
+
+    // pipe2(O_CLOEXEC) is Linux/glibc. Everywhere else, pipe() plus FD_CLOEXEC on both ends.
+    static bool pipe_cloexec(int fd[2]) {
+#if defined(__linux__)
+        return ::pipe2(fd, O_CLOEXEC) == 0;
+#else
+        if (::pipe(fd) != 0) {
+            return false;
+        }
+        for (int i = 0; i < 2; ++i) {
+            const int fl = ::fcntl(fd[i], F_GETFD);
+            if (fl < 0 || ::fcntl(fd[i], F_SETFD, fl | FD_CLOEXEC) != 0) {
+                ::close(fd[0]);
+                ::close(fd[1]);
+                return false;
+            }
+        }
+        return true;
+#endif
+    }
+
     bool send(const std::string & s) {
         if (in_fd_ < 0) {
             return false;

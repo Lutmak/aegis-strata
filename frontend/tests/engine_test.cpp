@@ -1,4 +1,4 @@
-// UnbiasedStrata: the engine adapter against the fake engine (frontend/tests/fake-engine.py). No GPU, no model.
+// aegis-strata: the engine adapter against the fake engine (frontend/tests/fake-engine.py). No GPU, no model.
 //
 //   c++ -std=c++20 -I frontend frontend/tests/engine_test.cpp -o engine_test && ./engine_test frontend/tests/fake-engine.py
 //

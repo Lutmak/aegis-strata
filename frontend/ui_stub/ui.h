@@ -1,4 +1,4 @@
-// UnbiasedStrata: stands in for the ui.h that llama.cpp's tools/ui generates at build time. tools/server/server-http.cpp
+// aegis-strata: stands in for the ui.h that llama.cpp's tools/ui generates at build time. tools/server/server-http.cpp
 // includes it to serve the web UI's embedded assets; this fork ships no UI, so the asset table is empty and every
 // lookup misses. Same declarations as tools/ui/ui.h.in with N_ASSETS = 0 and LLAMA_UI_HAS_ASSETS undefined.
 #pragma once

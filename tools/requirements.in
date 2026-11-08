@@ -1,0 +1,14 @@
+# Direct dependencies of the offline tools (tools/iq_pack.py, mtp_*.py, make_profile*.py, ...).
+# Not needed to build or to run the engines: nothing here is in the serving path.
+#
+# numpy, regex  the tools' own arithmetic and tokenizer patterns
+# pyyaml, tqdm  required by third_party/llama.cpp/gguf-py, which the pack tools import
+#               (gguf-py/pyproject.toml declares them; gguf/metadata.py and
+#                gguf/gguf_writer.py import them at module load)
+#
+# Regenerate the hash-pinned lock beside this file with:
+#   uv pip compile tools/requirements.in --generate-hashes -o tools/requirements.txt
+numpy
+regex
+pyyaml
+tqdm

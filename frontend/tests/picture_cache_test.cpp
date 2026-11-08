@@ -1,4 +1,4 @@
-// UnbiasedStrata: frontend/picture_cache.hpp without a model.
+// aegis-strata: frontend/picture_cache.hpp without a model.
 //
 //   c++ -std=c++20 -pthread -I frontend frontend/tests/picture_cache_test.cpp -o picture_cache_test && ./picture_cache_test
 //

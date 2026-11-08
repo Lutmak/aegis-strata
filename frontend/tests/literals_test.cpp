@@ -1,4 +1,4 @@
-// UnbiasedStrata: frontend/literals.hpp against nlohmann json (the interface common_json copies). No model.
+// aegis-strata: frontend/literals.hpp against nlohmann json (the interface common_json copies). No model.
 //
 //   c++ -std=c++20 -I frontend -I third_party/llama.cpp/vendor frontend/tests/literals_test.cpp -o literals_test && ./literals_test
 //

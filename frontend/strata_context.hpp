@@ -1,11 +1,11 @@
-// UnbiasedStrata: the server context with a Strata engine behind it.
+// aegis-strata: the server context with a Strata engine behind it.
 //
 // This is the fork's replacement for llama.cpp's tools/server/server-context.cpp. Everything around it is llama.cpp's
 // own, compiled unmodified from the submodule: the HTTP layer (server-http), the task queue and response reader
 // (server-queue), the task and result types with their OpenAI/Anthropic/Responses JSON (server-task), request parsing,
 // tokenization helpers and SSE formatting (server-common), the request schema (server-schema). What this file adds is
 // the part that llama.cpp does with llama_context, llama_batch and common_sampler and that the engine does inside
-// its own process: run one request at a time through `strata`/`strata-poly`, turn its `T <id>` lines into partial
+// its own process: run one request at a time through `strata`, turn its `T <id>` lines into partial
 // results, and its `DONE` line into the final one.
 #pragma once
 
@@ -34,6 +34,9 @@ struct strata_context {
     bool load(common_params & params, std::string & err);
     // --picture-cache: how many pictures' encoded rows are kept for the turns that resend them (0: none); before load()
     void set_picture_cache(size_t entries, size_t bytes);
+
+    // --no-sandbox / --sandbox-allow-read / --sandbox-allow-write; call before start_engine()
+    void set_sandbox(bool enabled, std::vector<std::string> allow_read, std::vector<std::string> allow_write);
 
     // Blocks the calling thread running the task loop until terminate().
     void start_loop();

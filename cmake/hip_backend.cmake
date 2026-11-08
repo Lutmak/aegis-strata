@@ -24,7 +24,7 @@ foreach(_arch IN LISTS _strata_hip_norm)
   string(REGEX REPLACE ":.*$" "" _base "${_arch}")      # gfx1100:xnack- -> gfx1100
   if(_base IN_LIST _strata_hip_validated)
   elseif(_base IN_LIST _strata_hip_community)
-    message(STATUS "Strata HIP: ${_base} was validated by community reports (docs/AMD_HIP.md)")
+    message(STATUS "Strata HIP: ${_base} was validated by community reports upstream")
   elseif(_base IN_LIST _strata_hip_unvalidated)
     message(WARNING "Strata HIP: ${_base} builds, but it is not validated on a real card yet; please report results")
   else()
@@ -107,7 +107,7 @@ if(CMAKE_HIP_ARCHITECTURES MATCHES "gfx11")
 endif()
 target_link_libraries(strata_hip_runtime INTERFACE hip::host)
 # The shim renames the CUDA runtime to HIP, force-included into every host and device source. On Windows the host
-# compiler is ROCm's clang++ too (tools/hip/build_windows.bat: CMake refuses to mix cl.exe with Clang HIP), which takes
+# compiler is ROCm's clang++ too (CMake refuses to mix cl.exe with Clang HIP), which takes
 # -include like it does on Linux; an MSVC-style front end (cl / clang-cl) takes /FI instead. Forward slashes, so /FI
 # does not read the path's backslashes as escapes.
 file(TO_CMAKE_PATH "${STRATA_HIP_COMPAT_INCLUDE_DIR}/cuda_runtime.h" _strata_hip_force)

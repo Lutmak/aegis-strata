@@ -1,5 +1,5 @@
 #!/bin/bash
-# PLAN.md step 13 (c), the API-only acceptance of a served model: sampled requests as the model card has them, a fixed
+# The API-only acceptance of a served model: sampled requests as the model card has them, a fixed
 # seed, decode and prompt-reading speed against the step-6/9 figures for the same box.
 #   acceptance-real-engine.sh <url> <model-alias> <outdir> [expected-decode-tok/s] [expected-pp-tok/s] [band=0.15]
 # Exit 0 when every check passes (speed checks only when an expectation is given). Raw responses are kept in <outdir>.

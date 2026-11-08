@@ -1,4 +1,4 @@
-// UnbiasedStrata: the empty UI asset table (see ui.h).
+// aegis-strata: the empty UI asset table (see ui.h).
 #include "ui.h"
 
 const llama_ui_asset * llama_ui_find_asset(const std::string & name) {

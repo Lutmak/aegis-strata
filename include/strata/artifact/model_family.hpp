@@ -2,8 +2,9 @@
 //
 // Strata was written for one model (Qwen3.8-Flash-Next, `qwen4exp`).  Qwen3.6-35B-A3B (`qwen35moe`) is a close
 // cousin (same tokenizer, the same Gated-DeltaNet + gated-attention 3:1 layer pattern, the same head dims), so the
-// reader, the geometry and the layout tables know both.  The ENGINE runs only the families `model_family_runs`
-// names; a recognised family it does not run yet is refused with `model_family_not_supported`, not mis-run.
+// reader, the geometry and the layout tables still know both -- that is what makes a Qwen3.6 file a named refusal
+// instead of a file mis-read as Flash-Next.  The ENGINE runs only the families `model_family_runs` names; a
+// recognised family it does not run is refused with `model_family_not_supported`, not mis-run.
 //
 // No dependencies: the GGUF reader (the architecture guard) and the core geometry both include this.
 #pragma once
@@ -48,9 +49,9 @@ inline const char* model_family_title(ModelFamily f) {
     }
 }
 
-/// Whether Flash-Next's engine path runs the family.  Qwen3.6 has an engine path of its own (src/qwen35), which the
-/// CUDA and HIP builds of `strata` switch to at the top of main(); the Intel Arc (SYCL) build has none yet, so there
-/// (and on Flash-Next's path) the family is refused with `model_family_not_supported`.
+/// Whether this engine runs the family.  Only Qwen3.8-Flash-Next is served; Qwen3.6 is still recognised by the
+/// reader, the geometry and the layout tables so that a Qwen3.6 file gets a refusal that names it, rather than
+/// being mis-read as Flash-Next. Every other family is refused with `model_family_not_supported`.
 inline bool model_family_runs(ModelFamily f) { return f == ModelFamily::Qwen4Exp; }
 
 /// The refusal for a recognised family the engine does not run (empty when it runs it).
@@ -58,8 +59,8 @@ inline std::string model_family_not_supported(ModelFamily f) {
     if (model_family_runs(f)) return {};
     if (f == ModelFamily::Unknown) return "this is not a model family Strata knows";
     return std::string(model_family_title(f)) + " (architecture '" + model_family_arch(f) +
-           "') runs on the NVIDIA (CUDA) and AMD (HIP) builds of Strata; this build does not run it yet (the Intel "
-           "Arc / SYCL port is in development). Use a CUDA or HIP build, or a Qwen3.8-Flash-Next model file";
+           "') is a family this reader knows, but the engine does not run it yet: it serves Qwen3.8-Flash-Next "
+           "('qwen4exp') only. Use a Qwen3.8-Flash-Next model file";
 }
 
 }  // namespace strata
