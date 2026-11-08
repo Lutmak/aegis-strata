@@ -1,0 +1,5 @@
+Write a small HTTP key-value store, `kvstore.py`, Python 3 standard library only (http.server is fine), single file.
+
+`python3 kvstore.py --port P --data FILE` serves: `PUT /kv/<key>` with the raw request body as the value (returns 204; 201 when the key is new); `GET /kv/<key>` returns the value as the body with the content type `application/octet-stream` (404 when absent); `DELETE /kv/<key>` returns 204 (404 when absent); `GET /kv` returns a JSON array of the keys, sorted; `GET /health` returns `{"ok": true, "keys": N}`. Keys are URL path segments (percent-decoded), values are bytes of any size up to 1 MiB (413 above). Every write is persisted to FILE (JSON with base64 values is fine) before the response is sent, so a restart with the same FILE sees the same data. Handle requests one at a time; it does not need to be fast.
+
+Write `test_kvstore.py` (pytest) that starts the server on a free port in a subprocess, exercises every route including the restart case, and shuts it down; run `python3 -m pytest -q` until it passes. Finish with `NOTES.md`: what you built, how you tested it, anything you left out.

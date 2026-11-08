@@ -1,0 +1,5 @@
+Write a minesweeper clone as a single page: `index.html` in the current directory, with its CSS and JavaScript inline or in `style.css` and `game.js` beside it. No build step, no network, no frameworks.
+
+Requirements: a 9x9 board with 10 mines placed at random on the first click (so the first click is never a mine); left click reveals a cell, revealing a zero flood-fills its neighbours; right click toggles a flag; a mine counter and a timer; a "New game" button; a clear win state (all safe cells revealed) and a loss state (a mine revealed, all mines shown). Cells must be real DOM elements with the CSS class `cell` and the data attributes `data-row` and `data-col`; a revealed cell also carries the class `revealed`, a flagged one `flagged`.
+
+Then check your own work: open the page's logic in node if you can (the game logic should be in functions you can call without a browser), or at least run `node --check` on the script, and read the HTML once more for mistakes. When you are done, write `NOTES.md`: what you built, how you tested it, and anything you left out.

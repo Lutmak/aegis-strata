@@ -1,0 +1,3 @@
+# Offline tools only (tools/iq_pack.py, mtp_*.py, make_profile*.py, ...). Not needed to build or run the engines.
+numpy
+regex

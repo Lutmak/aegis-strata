@@ -1,0 +1,5 @@
+[submodule "third_party/llama.cpp"]
+	path = third_party/llama.cpp
+	url = https://github.com/robertkarl/llama.cpp.git
+	branch = UnbiasedStrata
+	shallow = true

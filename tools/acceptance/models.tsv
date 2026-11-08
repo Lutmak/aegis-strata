@@ -1,0 +1,7 @@
+# model id (as the fork server announces it)	host port on this Mac (ssh tunnel to the box)	context	box
+qwen3.6-35b-a3b-ud-iq4_xs	18091	32768	A6000 VM
+qwen3.8-flash-next-iq3_xxs	18090	65536	A6000 VM
+qwen3.8-flash-next-iq3_xxs-3090	18092	65536	RTX 3090 pod
+qwen3.6-35b-a3b-ud-q3_k_m-3090	18094	32768	RTX 3090 pod
+deepseek-v4-flash-ud-iq2_xxs-b200	18095	32768	2x B200 pod
+glm-5.3-flash-3.0bit-b200	18096	32768	2x B200 pod
