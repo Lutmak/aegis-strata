@@ -2,13 +2,23 @@
 # aegis-strata — pinned build toolchain.  The first step toward a reproducible build.
 #
 # ===========================================================================
-#  UNVERIFIED.  This flake has never been evaluated or built.  Nix is not
-#  installed on the dev box (`command -v nix` finds nothing) and installing it
-#  needs root, so no `nix flake check`, no `nix develop`, no `nix build` has
-#  run against this file.  Treat every claim below as a stated intention until
-#  it has been evaluated on a machine with Nix installed and the output recorded.
-#  README rule 6: a verification that cannot run is a failure, never
-#  a warning.  This banner is that failure, written down instead of hidden.
+#  EVALUATED, NOT BUILT.  2026-11-08, Nix 2.35.4, nixpkgs f9a75f41 (see
+#  flake.lock).  `nix flake check '.?submodules=1'` passes: `lib`, `packages`
+#  and `devShells` all check, and both derivations evaluate.  The first run
+#  FAILED and found a real defect -- `aegis-strata-for` sat under `packages`,
+#  where every attribute must be a derivation, and it is a function.  It now
+#  lives under `lib`.
+#
+#  `nix build` has NOT succeeded here, and the reason is disk, not this file.
+#  nixpkgs fetches the CUDA redistributables straight from NVIDIA rather than
+#  from cache.nixos.org, so they are absent from `--dry-run` totals: libcublas
+#  alone is an 836 MB tarball whose static archives unpack to several GB.  The
+#  build ran out of space on a 49 GB root with 6 GB free.  Until it completes
+#  somewhere, treat the build claims below as intentions and the evaluation
+#  claims as checked.
+#
+#  README rule 6: a verification that cannot run is a failure, never a
+#  warning.  This banner is that failure, written down instead of hidden.
 # ===========================================================================
 #
 # What this gives that the Makefile cannot:
@@ -346,17 +356,19 @@
         };
     in
     {
-      packages.${system} = {
-        default = mkAegis { };
+      packages.${system}.default = mkAegis { };
 
-        # The builder itself, exposed so its two knobs are reachable.  `packages.default` is a
-        # derivation and has no `.override`, so documenting `default.override { ... }` named an API that does
-        # not exist -- and that was the only documented way to opt out of PORTABLE=1, the knob the
-        # reproducibility trade-off turns on.  Call this instead:
-        #   nix build '.?submodules=1' --impure --expr \
-        #     '(builtins.getFlake (toString ./.)).packages.x86_64-linux.aegis-strata-for { cudaArchs = "89"; }'
-        aegis-strata-for = mkAegis;
-      };
+      # The builder itself, exposed so its two knobs are reachable.  `packages.default` is a
+      # derivation and has no `.override`, so documenting `default.override { ... }` named an API that does
+      # not exist -- and that was the only documented way to opt out of PORTABLE=1, the knob the
+      # reproducibility trade-off turns on.  Call this instead:
+      #   nix build '.?submodules=1' --impure --expr \
+      #     '(builtins.getFlake (toString ./.)).lib.aegis-strata-for { cudaArchs = "89"; }'
+      #
+      # It lives under `lib`, not `packages`: every attribute of `packages.<system>` must be a
+      # derivation, and this is a function.  `nix flake check` rejected it here, which is the first
+      # thing evaluating this file actually caught.
+      lib.aegis-strata-for = mkAegis;
 
       # gcc comes from the shell's stdenv, not from `packages`: the stdenv is
       # what puts cc/c++ on PATH, so it has to be the pinned one.  mkShell
@@ -395,7 +407,7 @@
           export CUDAHOSTCXX="${hostCxx}"
           export CUDAToolkit_ROOT="${cudaToolkit}"
 
-          echo "aegis-strata devShell (UNVERIFIED flake: never evaluated; see the header of flake.nix)"
+          echo "aegis-strata devShell (flake evaluated, build unproven: see the header of flake.nix)"
           echo "  nvcc   : $(nvcc --version 2>/dev/null | tail -1)"
           echo "  g++    : $(${hostCxx} --version | head -1)"
           echo "  cmake  : $(cmake --version | head -1)"
