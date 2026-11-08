@@ -97,7 +97,16 @@ struct Literals {
     template <class J>
     bool has_literal(const J & v) const {
         if (v.is_string()) return has_literal(v.template get<std::string>());
-        if (v.is_array() || v.is_object()) {
+        if (v.is_object()) {
+            // Iterating a JSON object yields its VALUES, so a plain range-for here missed every key. An object
+            // key is rendered into the prompt just as a value is -- a tool schema's property names are the
+            // reachable case, and an untrusted tool definition is a realistic source of one.
+            for (auto kv : v.items()) {
+                if (has_literal(kv.key()) || has_literal(kv.value())) return true;
+            }
+            return false;
+        }
+        if (v.is_array()) {
             for (const auto & x : v) {
                 if (has_literal(x)) return true;
             }
@@ -127,6 +136,22 @@ struct Literals {
             if (v.contains("type") && v.at("type").is_string()) {
                 const std::string t = v.at("type").template get<std::string>();
                 if (t == "image_url" || t == "input_audio" || t == "video_url" || t == "file") return;
+            }
+            // A key that carries a literal has to be marked like any other prompt text. nlohmann keys are
+            // immutable, so such an object is rebuilt; the common case (no key needs it) keeps the cheap walk.
+            bool rebuild = false;
+            for (auto kv : v.items()) {
+                if (has_literal(kv.key())) { rebuild = true; break; }
+            }
+            if (rebuild) {
+                J out = J::object();
+                for (auto kv : v.items()) {
+                    J child = kv.value();
+                    mark_deep(child);
+                    out[mark(kv.key())] = std::move(child);
+                }
+                v = std::move(out);
+                return;
             }
             for (auto kv : v.items()) mark_deep(kv.value());
             return;

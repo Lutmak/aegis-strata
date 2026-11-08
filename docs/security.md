@@ -470,13 +470,56 @@ this change.
 
 ---
 
+### Found by adversarial review, not yet fixed
+
+An adversarial pass over `server/` and the engine's file readers on 2026-11-08 produced these. Two
+findings from the same pass — the pathname-socket escape and control-token literals in JSON object
+keys — were fixed and are covered by tests; the rest are recorded here rather than fixed, and none
+of them is reachable without either an operator-supplied file or a client that is already trusted to
+send requests.
+
+- **There is no engine timeout, so a wedged engine blocks the server until it is restarted.**
+  Reproduced with a stand-in engine that reads `GEN` and then goes silent: the request hangs, and
+  after the client gives up `/health` still reports `busy`. The supervisor only watches for the
+  engine *exiting*. A per-request idle watchdog plus a hard deadline after `STOP` is the fix.
+- **The engine child inherits the server's environment**, because `server/engine.hpp` uses `execv`.
+  llama.cpp's own argument code reads `LLAMA_API_KEY` from the environment, so code running inside a
+  compromised engine can read the operator's API key out of `/proc/self/environ`. `LD_PRELOAD` and
+  `LD_LIBRARY_PATH` pass through as well. `execve` with an allowlisted environment is the fix, and it
+  needs a GPU run to confirm which `CUDA_*` variables must survive.
+- **The MTP runtime's `dense.txt` is trusted.** `rows`, `cols`, `off` and `bytes` are read straight
+  from the text file and never checked against the size of `dense.bin`, so a malformed pair of files
+  gives an out-of-bounds read, and under `--mtp-q4` an overflowing size product gives a heap write.
+  The operator supplies these files, so this is a robustness gap rather than a remote one, but
+  invariant 4 claims a clean exit on a malformed model file and this does not deliver it.
+- **The control-vector reader does not bounds-check.** `src/program/generate.cpp` reads N floats at a
+  file-supplied offset with no check that the tensor lies inside the mapping, while the same codebase
+  has an `in_bounds` helper used elsewhere.
+- **The whole of `/dev/shm` is granted with write, remove and make-socket rights.** Other files of the
+  same user live there. A private subdirectory per run would be narrower.
+- **Splitting a control token across adjacent content parts defeats the literal marker.** Each part is
+  matched on its own, so `[{"text":"a<|im_"},{"text":"end|>b"}]` renders a real token where the same
+  text in one string is correctly quoted. Joining adjacent text parts before matching is the fix.
+- **Three ways for a client to spend the server's CPU**: `logit_bias` parsing is quadratic (300,000
+  entries held one core for over a minute, and a client disconnect does not stop it), an engine line
+  with no newline is buffered without limit, and about 1,500 half-open connections exhaust the HTTP
+  thread pool. A body of 8 MB is tokenized in full before the context check rejects it. Request
+  nesting beyond ~200,000 levels overflows the stack. The server serves one request at a time on
+  loopback, which is what keeps these mild.
+- **Shutdown is untidy**: `SIGTERM` and `SIGINT` both exit 1, so a service manager counts a clean stop
+  as a failure, and every run leaves its `mkdtemp` directory behind (121 were found on the reference
+  machine).
+- **Malformed JSON generally returns 500 rather than 400**, and `/detokenize` leaks
+  `vector::_M_range_check` text on an out-of-range id.
+
 ### Not checked
 
-- **Nothing was run against the real engine, a real model, or a GPU.** The validation is
-  `sandbox_test` (14 cases, all passing, three deliberate breaks each producing exactly its named
-  failure) plus static analysis of the engine's and CUDA's import sets. Whether CUDA initialises
-  under this exact filter and allowlist on the RTX 3080 Ti is **unverified**, and it is the first
-  thing to run on a machine with the card.
+- ~~Nothing was run against the real engine, a real model, or a GPU.~~ **Now run.** On 2026-11-08 the
+  whole path was exercised on the reference machine with the real weights: the engine loads under the
+  filter and the allowlist, `/health` reports `loaded` with `sandbox = enforced`, and non-streaming
+  completions, SSE streaming and a tool call all answered correctly. That was repeated after the
+  ABI 6/9 hardening above, so CUDA is confirmed to initialise with pathname sockets denied and
+  signals scoped. The GPU-free validation is still `sandbox_test`, now 59 assertions.
 - **Whether CUDA ever calls `socket()` with a domain other than `AF_UNIX`** is unverified. No CUDA
   library imports `getaddrinfo`, which rules out DNS, and `libcuda`'s socket use is consistent with
   local IPC (`nvidia-persistenced`, MPS) — but "consistent with" is not "confirmed". The
@@ -487,8 +530,22 @@ this change.
 - **The fail-closed branch for a kernel without Landlock was not exercised.** The reference machine has
   `CONFIG_SECURITY_LANDLOCK=y` and `landlock` in `/sys/kernel/security/lsm`, so the branch is
   unreachable here. Reviewed by reading, not tested.
-- **Landlock ABI 10 is what this kernel reports; this design only uses features up to ABI 5** plus
-  ABI 4's network rights. What ABIs 6-10 add was not researched, and no claim is made about them.
+- **Landlock ABIs 6-10 have now been researched, and two of them were load-bearing.** The earlier
+  version of this document said they were not, and that gap hid a complete escape. Up to ABI 5 the
+  kernel does not govern `connect()` to a *pathname* `AF_UNIX` socket at all, and the syscall filter
+  permits `connect()` because CUDA needs it. A contained engine therefore reached
+  `/run/user/<uid>/bus`, `/run/user/<uid>/systemd/private` and `/run/dbus/system_bus_socket`, and all
+  three answered `OK <guid>` to `AUTH EXTERNAL` — and an authenticated caller on the systemd socket can
+  ask for a transient unit, which runs outside the sandbox with the host network. ABI 9's
+  `LANDLOCK_ACCESS_FS_RESOLVE_UNIX` closes it, and ABI 6's `LANDLOCK_SCOPE_SIGNAL` and
+  `LANDLOCK_SCOPE_ABSTRACT_UNIX_SOCKET` close signalling and abstract sockets. All three are now
+  requested, no path is granted `RESOLVE_UNIX`, and `server/tests/sandbox_test.cpp` asserts
+  `unixpath=denied signal=denied` under enforcement and the inverse with the sandbox off. CUDA was
+  re-verified on the reference machine afterwards: the engine loads and serves with
+  `sandbox = enforced`. If a future CUDA feature needs a socket (MPS, nvidia-persistenced), grant
+  `RESOLVE_UNIX` on that exact path rather than widening the handled set.
+- **ABIs 7, 8 and 10 are still not used.** They were read but nothing in them was needed here; no
+  claim is made about what they would add.
 - **The `--mmproj` / `GENI` picture path was not tested under the sandbox at all** — not in
   `sandbox_test` (no projector) and not in `e2e.sh` (which only checks that a picture without
   `--mmproj` is refused). The `/tmp` read entry is reasoned from

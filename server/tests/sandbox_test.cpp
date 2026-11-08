@@ -74,8 +74,10 @@
 #include <vector>
 
 #include <fcntl.h>
+#include <csignal>
 #include <sys/socket.h>
 #include <sys/syscall.h>
+#include <sys/un.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
 #include <unistd.h>
@@ -131,6 +133,36 @@ const MountCall kMountCalls[] = {
     {"open_tree", 428}, {"move_mount", 429}, {"fsopen", 430},     {"fsconfig", 431},
     {"fsmount", 432},   {"fspick", 433},     {"mount_setattr", 442},
 };
+
+// Landlock governs connect() to a pathname AF_UNIX socket only when LANDLOCK_ACCESS_FS_RESOLVE_UNIX (ABI 9) is
+// in the ruleset's handled set. Before it was, a contained engine reached /run/user/<uid>/bus and
+// /run/user/<uid>/systemd/private and got `OK <guid>` from both -- a full escape, since systemd will start a
+// transient unit for an authenticated caller. The target here is the canary's sibling socket: the canary's
+// directory is deliberately outside the allowlist, and the socket is this user's own, so a plain DAC check would
+// permit the connect. /etc/passwd is NOT a usable target -- connect() needs write permission, so mode 0644 denies
+// it with EACCES whether Landlock is involved or not, which would make this assertion pass for the wrong reason.
+const char * try_connect_path(const char * path) {
+    const int s = ::socket(AF_UNIX, SOCK_STREAM, 0);
+    if (s < 0) {
+        return "nosocket";
+    }
+    sockaddr_un addr{};
+    addr.sun_family = AF_UNIX;
+    std::snprintf(addr.sun_path, sizeof addr.sun_path, "%s", path);
+    const int rc = ::connect(s, (sockaddr *) &addr, sizeof addr);
+    const int saved = errno;
+    ::close(s);
+    if (rc == 0) {
+        return "ok";
+    }
+    return saved == EACCES || saved == EPERM ? "denied" : "other";
+}
+
+// LANDLOCK_SCOPE_SIGNAL (ABI 6). The parent is outside the Landlock domain, so a scoped child cannot signal it.
+// Without the scope the engine could SIGKILL its own supervisor, the operator's shell or their compositor.
+const char * try_signal_parent() {
+    return ::kill(::getppid(), 0) == 0 ? "ok" : (errno == EPERM ? "denied" : "other");
+}
 
 const char * try_mount_api(long nr) {
     const long rc = ::syscall(nr, 0, 0, 0, 0, 0);   // must not return: SIGSYS
@@ -195,6 +227,8 @@ int probe(int argc, char ** argv) {
                 try_read(canary), try_read(allowed),
                 try_read("/proc/self/status"), try_read("/proc/meminfo"), try_read(other.c_str()));
     std::printf("ifaces=%d\n", count_interfaces());
+    std::printf("unixpath=%s signal=%s\n",
+                try_connect_path((std::string(canary) + ".sock").c_str()), try_signal_parent());
     std::fflush(stdout);
     return 0;
 }
@@ -326,6 +360,19 @@ int main(int argc, char ** argv) {
         if (fd >= 0) { CHECK(::write(fd, "x", 1) == 1); ::close(fd); }
     }
 
+    // A listening socket beside the canary, for the two probes above. It stays open for the whole run; the
+    // address is unlinked with the temp directory at the end.
+    const std::string victim_sock = canary + ".sock";
+    const int victim_fd = ::socket(AF_UNIX, SOCK_STREAM, 0);
+    CHECK(victim_fd >= 0);
+    if (victim_fd >= 0) {
+        sockaddr_un vaddr{};
+        vaddr.sun_family = AF_UNIX;
+        std::snprintf(vaddr.sun_path, sizeof vaddr.sun_path, "%s", victim_sock.c_str());
+        CHECK(::bind(victim_fd, (sockaddr *) &vaddr, sizeof vaddr) == 0);
+        CHECK(::listen(victim_fd, 4) == 0);
+    }
+
     // The policy: the defaults, with the model directory added as the engine's own and the canary's directory
     // deliberately left out. /tmp is in the default read set for the GENI rows file, so the canary must not sit
     // directly in /tmp - it sits in a mkdtemp directory, whose own entry is never added.
@@ -366,6 +413,8 @@ int main(int argc, char ** argv) {
     CHECK(has(o.out, "procself=ok"));
     CHECK(has(o.out, "proc_meminfo=ok"));
     CHECK(has(o.out, "proc_other=denied"));
+    CHECK(has(o.out, "unixpath=denied"));
+    CHECK(has(o.out, "signal=denied"));
     const bool netns = o.notes.empty();
     if (netns) {
         CHECK(has(o.out, "ifaces=1"));   // only `lo`
@@ -429,6 +478,8 @@ int main(int argc, char ** argv) {
         CHECK(has(w.out, "netlink=ok"));
         CHECK(has(w.out, "unix=ok"));
         CHECK(has(w.out, "canary=ok"));
+        CHECK(has(w.out, "unixpath=ok"));
+        CHECK(has(w.out, "signal=ok"));
         CHECK(has(w.out, "model=ok"));
         CHECK(has(w.out, "proc_other=ok"));
         // and the kill list, which case 13 never used to touch: without the filter these RUN instead of dying

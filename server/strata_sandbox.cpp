@@ -146,6 +146,7 @@ constexpr int           kRulePathBeneath      = 1;  // LANDLOCK_RULE_PATH_BENEAT
 struct LlRulesetAttr {
     std::uint64_t handled_access_fs;
     std::uint64_t handled_access_net;   // ABI 4; not sent to an older kernel (see ruleset_attr_size())
+    std::uint64_t scoped;               // ABI 6; likewise
 };
 
 struct LlPathBeneathAttr {
@@ -171,6 +172,19 @@ constexpr std::uint64_t kLlMakeSym    = 1ULL << 12;
 constexpr std::uint64_t kLlRefer      = 1ULL << 13;  // ABI 2: rename/link across hierarchies
 constexpr std::uint64_t kLlTruncate   = 1ULL << 14;  // ABI 3
 constexpr std::uint64_t kLlIoctlDev   = 1ULL << 15;  // ABI 5: ioctl on a device file
+// ABI 9. Without this bit in `handled`, Landlock does not govern connect() to a pathname AF_UNIX socket at all,
+// and the filter permits connect() because CUDA needs it. A contained engine could therefore reach
+// /run/user/<uid>/bus, /run/user/<uid>/systemd/private and /run/dbus/system_bus_socket, authenticate with
+// AUTH EXTERNAL, and ask systemd to start a transient unit -- which runs outside this sandbox with the host
+// network. Measured: all three answered `OK <guid>` before this bit was handled. No path is granted it, so every
+// such connect is now refused; if a future CUDA feature needs one (MPS, nvidia-persistenced), grant it on that
+// exact socket rather than widening this.
+constexpr std::uint64_t kLlResolveUnix = 1ULL << 16;
+
+// ABI 6 scopes. These restrict what the sandboxed process may reach OUTSIDE its own Landlock domain; they do not
+// affect the supervisor signalling the child, because the supervisor is not in the domain.
+constexpr std::uint64_t kLlScopeAbstractUnix = 1ULL << 0;   // LANDLOCK_SCOPE_ABSTRACT_UNIX_SOCKET
+constexpr std::uint64_t kLlScopeSignal       = 1ULL << 1;   // LANDLOCK_SCOPE_SIGNAL
 
 // ABI 4 network rights. Handled with no rule added, so every TCP bind and connect is refused. This is a second
 // lock only: it is TCP-only, so it cannot be the control for invariant 1 (UDP would walk straight past it).
@@ -213,11 +227,16 @@ std::uint64_t landlock_handled_fs(int abi) {
     if (abi >= 2) h |= kLlRefer;
     if (abi >= 3) h |= kLlTruncate;
     if (abi >= 5) h |= kLlIoctlDev;
+    if (abi >= 9) h |= kLlResolveUnix;
     return h;
 }
 
 std::size_t ruleset_attr_size(int abi) {
-    return abi >= 4 ? sizeof(LlRulesetAttr) : sizeof(std::uint64_t);
+    // One field per ABI step, so the size is the prefix the kernel understands: fs only (ABI 1-3), plus net
+    // (ABI 4-5), plus scoped (ABI 6+). Sending a longer struct than the kernel knows is E2BIG.
+    if (abi >= 6) return sizeof(LlRulesetAttr);                 // fs + net + scoped
+    if (abi >= 4) return 2 * sizeof(std::uint64_t);             // fs + net
+    return sizeof(std::uint64_t);                               // fs
 }
 
 int landlock_abi() {
@@ -899,6 +918,9 @@ int sandbox_apply(const SandboxPlan & plan, int err_fd) noexcept {
         LlRulesetAttr attr{};
         attr.handled_access_fs  = landlock_handled_fs(plan.landlock_abi);
         attr.handled_access_net = plan.landlock_abi >= 4 ? (kLlNetBindTcp | kLlNetConnectTcp) : 0;
+        // Abstract sockets have no path for a rule to name, so scoping is the only way to deny them; signals are
+        // scoped so a contained engine cannot SIGKILL the supervisor, the operator's shell or their compositor.
+        attr.scoped             = plan.landlock_abi >= 6 ? (kLlScopeAbstractUnix | kLlScopeSignal) : 0;
         const long rs = ::syscall(__NR_landlock_create_ruleset, &attr, ruleset_attr_size(plan.landlock_abi), 0u);
         if (rs < 0) {
             SANDBOX_FAIL(SandboxStage::LandlockCreate);
