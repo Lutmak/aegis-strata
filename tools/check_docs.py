@@ -44,19 +44,19 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 
 # The unmodified UnbiasedStrata import. `git diff IMPORT HEAD` is this fork's complete provenance
-# (PROVENANCE.md), which is also why inherited engine source is out of scope below.
+# (see the README), which is also why inherited engine source is out of scope below.
 IMPORT = "39cab36"   # diffed against the WORKING TREE, not HEAD: see answerable()
 
 # Files we are answerable for when git is unavailable (a source tarball has no `.git`). Deliberately
-# the front end, the build glue and our own tooling: never inherited engine source.
+# the server, the build glue and our own tooling: never inherited engine source.
 FALLBACK_ANSWERABLE = (
     "CMakeLists.txt", "Makefile", "flake.nix",
-    "frontend/engine.hpp", "frontend/literals.hpp", "frontend/main.cpp",
-    "frontend/picture_cache.hpp", "frontend/strata_context.cpp", "frontend/strata_context.hpp",
-    "frontend/strata_sandbox.cpp", "frontend/strata_sandbox.h",
-    "frontend/tests/engine_test.cpp", "frontend/tests/fake-engine.py",
-    "frontend/tests/literals_test.cpp", "frontend/tests/picture_cache_test.cpp",
-    "frontend/tests/sandbox_test.cpp", "frontend/tests/e2e.sh",
+    "server/engine.hpp", "server/literals.hpp", "server/main.cpp",
+    "server/picture_cache.hpp", "server/strata_context.cpp", "server/strata_context.hpp",
+    "server/strata_sandbox.cpp", "server/strata_sandbox.h",
+    "server/tests/engine_test.cpp", "server/tests/fake-engine.py",
+    "server/tests/literals_test.cpp", "server/tests/picture_cache_test.cpp",
+    "server/tests/sandbox_test.cpp", "server/tests/e2e.sh",
     "tools/check_docs.py",
 )
 
@@ -117,13 +117,17 @@ def tracked_files() -> list[str]:
     builds is an extracted archive with no `.git`. A check that needs a repository would fail
     `make test` for exactly the people the source-only rule exists to serve.
     """
-    out = run_git("ls-files")
+    # --cached plus --others --exclude-standard is "what a cloner gets once this is committed": tracked
+    # files AND new ones that are not ignored. Plain `ls-files` sees only the index, so a document
+    # added in the working tree counted as missing and every reference to it failed. --exclude-standard
+    # still filters .gitignore and .git/info/exclude, so local-only notes stay out of scope.
+    out = run_git("ls-files", "--cached", "--others", "--exclude-standard")
     if out is not None:
         return out.splitlines()
     # third_party is the pinned submodule: upstream's content, not ours to police. Without this the walk
     # reported 4,261 files in a source tarball against 634 from git, so a user's `make test` could fail
     # over a markdown file inside llama.cpp.
-    skip = {".git", "third_party", "build", "build-frontend", ".venv", "upstream-ubs",
+    skip = {".git", "third_party", "build", "build-server", ".venv", "upstream-ubs",
             "result", "__pycache__"}
     found = []
     for path in ROOT.rglob("*"):
@@ -145,10 +149,10 @@ def authored(tracked: set[str]) -> set[str]:
     `src/program/generate.cpp` counts as "edited" only because this fork deleted code from it.
     """
     docs = {p for p in tracked if p.endswith(".md")}
-    # The front end and this fork's own tooling, whatever git says about who first created the path.
-    # `--diff-filter=A` alone missed frontend/engine.hpp, because upstream had a file by that name --
+    # The server and this fork's own tooling, whatever git says about who first created the path.
+    # `--diff-filter=A` alone missed server/engine.hpp, because upstream had a file by that name --
     # and the comment at the top of it sent readers to a document this fork deleted.
-    ours = {p for p in tracked if p.startswith("frontend/")}
+    ours = {p for p in tracked if p.startswith("server/")}
     glue = {p for p in ("CMakeLists.txt", "Makefile", "flake.nix", "tools/check_docs.py") if p in tracked}
     out = run_git("diff", "--name-only", "--diff-filter=A", IMPORT)
     if out is None:
@@ -165,7 +169,7 @@ def answerable(tracked: set[str]) -> set[str]:
     Inherited engine source is excluded on purpose. Its comments cite upstream's private design
     notes, which this distribution does not contain, and rewriting them to fix that would change
     `git diff IMPORT HEAD` -- the provenance claim the repository's shape exists to protect.
-    PROVENANCE.md discloses it instead.
+    The README discloses it instead.
     """
     docs = {p for p in tracked if p.endswith(".md")}
     out = run_git("diff", "--name-only", IMPORT)
@@ -193,7 +197,7 @@ def kill_list(src: str) -> set[str]:
 
 
 def documented_kills(table: str) -> set[str]:
-    """The syscalls docs/SANDBOX.md's kill-list table names.
+    """The syscalls docs/sandbox.md's kill-list table names.
 
     Three columns exactly. The table above it documents the two syscalls filtered by ARGUMENT rather than
     killed outright (`socket` and `socketpair`, allowed for AF_UNIX), and reading both as one list made the
@@ -217,7 +221,7 @@ def filter_facts() -> tuple[int | None, int | None, str]:
     the model still returns the old number while the real filter has a new one, so a document stating
     it would pass while being false. That is this project's own failure mode inside its own guard.
     """
-    for candidate in ("build-frontend/bin/sandbox_test", "build/bin/sandbox_test"):
+    for candidate in ("build-server/bin/sandbox_test", "build/bin/sandbox_test"):
         exe = ROOT / candidate
         if not exe.is_file():
             continue
@@ -244,7 +248,7 @@ def main() -> int:
               "literals": 0, "numbers": 0, "logs": 0, "kills": 0, "invariants": 0}
     skipped_citations = 0
 
-    sandbox_src = (ROOT / "frontend/strata_sandbox.cpp").read_text()
+    sandbox_src = (ROOT / "server/strata_sandbox.cpp").read_text()
     killed = kill_list(sandbox_src)
     want_insns, want_kills, facts_from = filter_facts()
     if want_insns is None:
@@ -276,12 +280,12 @@ def main() -> int:
             line = text[:m.start()].count("\n") + 1
             if rel in ours:
                 problems.append(f"{rel}:{line}: names `{name}`, which is not a file in this repository")
-            # A reference inside inherited engine source is upstream's; PROVENANCE.md discloses it.
+            # A reference inside inherited engine source is upstream's; the README discloses it.
 
         if rel not in ours or rel == SELF:
             continue
         for name in UNPUBLISHED:
-            # The lookbehind keeps `RISKS.md` from matching inside `docs/SANDBOX-RISKS.md`, which is a
+            # The lookbehind keeps `RISKS.md` from matching inside `docs/security.md`, which is a
             # real file: a hyphen counts as a word boundary, so \b alone reported the shipped
             # document as the unpublished one.
             for m in re.finditer(rf"(?<![A-Za-z0-9_./-]){re.escape(name)}\b", text):
@@ -346,7 +350,7 @@ def main() -> int:
                 continue
             if path.startswith(("http", "/", "~", "..")) or "third_party/" in path or "*" in path:
                 continue
-            if any(path.startswith(p) for p in ("build/", "build-frontend/", "result/",
+            if any(path.startswith(p) for p in ("build/", "build-server/", "result/",
                                                 "upstream-ubs/", "nix/store", "models/")):
                 continue
             # An owner/repo slug (`robertkarl/llama.cpp`) is not a path: two components, and the
@@ -390,7 +394,7 @@ def main() -> int:
         # ---- 9: numbered cross-references carry their own words ----
         invariants = {}
         try:
-            tm = (ROOT / "THREAT_MODEL.md").read_text()
+            tm = (ROOT / "docs/security.md").read_text()
             invariants = {int(n): h for n, h in re.findall(r"^#{2,4} (\d+)\.\s+(.+)$", tm, re.M)}
         except OSError:
             pass
@@ -399,31 +403,31 @@ def main() -> int:
             counts["invariants"] += 1
             heading = invariants.get(number)
             if heading is None:
-                problems.append(f"{rel}: cites invariant {number}, which THREAT_MODEL.md does not define")
+                problems.append(f"{rel}: cites invariant {number}, which docs/security.md does not define")
                 continue
             words = {w for w in re.findall(r"[a-z]{3,}", gloss.lower()) if w not in STOPWORDS}
             have = {w for w in re.findall(r"[a-z]{3,}", heading.lower()) if w not in STOPWORDS}
             if len(words & have) < 2:
                 problems.append(f"{rel}: glosses invariant {number} as \"{gloss}\" but "
-                                f"THREAT_MODEL.md calls it \"{heading}\"")
+                                f"docs/security.md calls it \"{heading}\"")
 
     # ---- 8: the kill list against the table that documents it, both directions ----
     counts["kills"] = len(killed)
     try:
-        table = (ROOT / "docs/SANDBOX.md").read_text()
+        table = (ROOT / "docs/sandbox.md").read_text()
     except OSError:
-        problems.append("docs/SANDBOX.md cannot be read, so the kill-list table cannot be checked")
+        problems.append("docs/sandbox.md cannot be read, so the kill-list table cannot be checked")
     else:
         documented = documented_kills(table)
         for name in sorted(killed - documented):
-            problems.append(f"docs/SANDBOX.md: the filter kills {name} but its table does not list it")
+            problems.append(f"docs/sandbox.md: the filter kills {name} but its table does not list it")
         for name in sorted(documented - killed):
-            problems.append(f"docs/SANDBOX.md: its table lists {name} but the filter does not kill it, "
+            problems.append(f"docs/sandbox.md: its table lists {name} but the filter does not kill it, "
                             f"so the document claims a protection the code does not provide")
         if killed and not documented:
-            problems.append("docs/SANDBOX.md: the kill-list table could not be parsed at all")
+            problems.append("docs/sandbox.md: the kill-list table could not be parsed at all")
         if want_kills is not None and len(killed) != want_kills:
-            problems.append(f"frontend/strata_sandbox.cpp: kKilled[] has {len(killed)} entries but the "
+            problems.append(f"server/strata_sandbox.cpp: kKilled[] has {len(killed)} entries but the "
                             f"built filter reports {want_kills}")
 
     if listing:

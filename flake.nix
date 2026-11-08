@@ -6,7 +6,7 @@
 #  installed on the dev box (`command -v nix` finds nothing) and installing it
 #  needs root, so no `nix flake check`, no `nix develop`, no `nix build` has
 #  run against this file.  Treat every claim below as a stated intention until
-#  the commands in docs/NIX-VERIFICATION.md have been run and their output recorded.
+#  it has been evaluated on a machine with Nix installed and the output recorded.
 #  README rule 6: a verification that cannot run is a failure, never
 #  a warning.  This banner is that failure, written down instead of hidden.
 # ===========================================================================
@@ -52,7 +52,7 @@
 #     occurrences of STRATA_BUILD_ID and exactly one execute_process (the
 #     `import numpy` probe, CMakeLists.txt#import numpy).  So the engine binaries
 #     `strata` / `strata-poly` / `libstrata_kq.so` now embed no commit at all;
-#     only the front end does, through llama.cpp.
+#     only the server does, through llama.cpp.
 #
 #   * The CUDA toolkit is a redistributable binary.  cudaPackages_13_4 is
 #     NVIDIA's prebuilt nvcc, cudart and cuBLAS, unpacked and patchelf'd.
@@ -65,7 +65,7 @@
 #     not pretend otherwise.  What the flake buys is that the toolkit becomes
 #     a *named, hash-pinned* input instead of whatever the host happened to
 #     have in /opt/cuda.  MAIN SESSION: decide how this is documented —
-#     THREAT_MODEL.md is the right home, and hard rule 1 probably needs an
+#     docs/security.md is the right home, and hard rule 1 probably needs an
 #     explicit, narrow carve-out for the compiler rather than being quietly
 #     contradicted by a build file.
 #
@@ -124,7 +124,7 @@
     #
     # The rev is immutable, but a rev alone is a git sha1, not an integrity
     # check of the fetched tree.  The SHA-256 (`narHash`) lives in flake.lock,
-    # and flake.lock has not been generated — see docs/NIX-LOCK.md.  Until it
+    # and flake.lock has not been generated, because that needs Nix itself.  Until it
     # exists, hard rule 5 is only half satisfied, and that is a gap, not a
     # detail.
     nixpkgs.url = "github:NixOS/nixpkgs/f9a75f41be3a74eab55d3a7679d34ad6cc0da977";
@@ -162,7 +162,7 @@
       # injecting a `;`-separated CUDAToolkit_ROOT through the cmake configure
       # hook — which this derivation bypasses, because it drives the project's
       # own Makefile.  One root is the simplest thing that can work; if it does
-      # not, docs/NIX-VERIFICATION.md says what to try next.
+      # not, nixpkgs' own CUDA/gcc compatibility table is the place to look.
       cudaToolkit = cudaPackages.cudatoolkit;
 
       # gcc 15.3.0.  nvcc 13.4.92 on the reference machine rejects its gcc 16.2.1.
@@ -199,7 +199,7 @@
         ]
       );
 
-      # The commit compiled into the front end.  Without this, the Nix sandbox
+      # The commit compiled into the server.  Without this, the Nix sandbox
       # has no .git and no git binary, so llama.cpp's build-info falls back to
       # "unknown"/0: deterministic, but a binary that cannot say what it was
       # built from.  `self.shortRev` is the flake's own revision and is absent
@@ -226,7 +226,7 @@
             pkgs.gnumake
             # Adds /run/opengl-driver/lib to the binaries' RUNPATH so libcuda.so
             # (the kernel driver's userspace half, which is NOT in the store and
-            # never can be) is found at run time.  See NIX.md: on Arch this
+            # never can be) is found at run time.  On Arch this
             # directory does not exist by default and the artifact needs help.
             pkgs.autoAddDriverRunpath
           ];
@@ -242,7 +242,7 @@
           # *split* packages propagate and this symlinkJoin may not.  If
           # `patchelf --print-rpath result/bin/strata` shows a .../lib/stubs
           # entry, add cudaPackages.removeStubsFromRunpathHook to
-          # nativeBuildInputs.  docs/NIX-VERIFICATION.md step 9 checks for this.
+          # nativeBuildInputs.
           buildInputs = [ cudaToolkit ];
 
           # We configure through the project's Makefile, which is the real build
@@ -304,11 +304,11 @@
           '';
 
           # `make test` is deliberately not run here.  It configures a second,
-          # CUDA-free build directory (build-frontend) and needs python3 and
+          # CUDA-free build directory (build-server) and needs python3 and
           # curl, so it roughly doubles the build for a check that is better
-          # run as its own CI job — and running the front-end tests needs no
+          # run as its own CI job — and running the server tests needs no
           # GPU, which is the whole reason CI is possible at all (README
-          # §12).  Not covered by this flake; see NIX.md.
+          # §12).  Not covered by this flake.
           doCheck = false;
 
           installPhase = ''
@@ -330,7 +330,7 @@
               exit 1
             }
             test -x $out/bin/aegis || {
-              echo "aegis-strata: front end 'aegis' was not produced" >&2
+              echo "aegis-strata: server 'aegis' was not produced" >&2
               exit 1
             }
 
@@ -349,7 +349,7 @@
       packages.${system} = {
         default = mkAegis { };
 
-        # The builder itself, exposed so the two knobs in NIX.md are reachable.  `packages.default` is a
+        # The builder itself, exposed so its two knobs are reachable.  `packages.default` is a
         # derivation and has no `.override`, so documenting `default.override { ... }` named an API that does
         # not exist -- and that was the only documented way to opt out of PORTABLE=1, the knob the
         # reproducibility trade-off turns on.  Call this instead:
@@ -375,7 +375,7 @@
           # documented `uv run` / tools/requirements.txt workflow still works
           # inside the shell for anyone who prefers it to pythonTooling above.
           pkgs.uv
-          # frontend/tests/e2e.sh drives the HTTP surface with curl, and the
+          # server/tests/e2e.sh drives the HTTP surface with curl, and the
           # submodule needs git.
           pkgs.curl
           pkgs.git
@@ -395,7 +395,7 @@
           export CUDAHOSTCXX="${hostCxx}"
           export CUDAToolkit_ROOT="${cudaToolkit}"
 
-          echo "aegis-strata devShell (UNVERIFIED flake — see NIX.md)"
+          echo "aegis-strata devShell (UNVERIFIED flake: never evaluated; see the header of flake.nix)"
           echo "  nvcc   : $(nvcc --version 2>/dev/null | tail -1)"
           echo "  g++    : $(${hostCxx} --version | head -1)"
           echo "  cmake  : $(cmake --version | head -1)"

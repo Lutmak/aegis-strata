@@ -1,5 +1,5 @@
 #!/bin/bash
-# First end-to-end checks of the UnbiasedStrata 2 front end against a real engine. Raw responses are kept in $OUT.
+# First end-to-end checks of the UnbiasedStrata 2 server against a real engine. Raw responses are kept in $OUT.
 #   us2-smoke.sh http://127.0.0.1:18090 <outdir> <model-alias>
 set -u
 URL=$1; OUT=$2; MODEL=$3; mkdir -p "$OUT"

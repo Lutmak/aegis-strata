@@ -1,4 +1,4 @@
-// aegis-strata: the front end's program. Mirrors llama.cpp's tools/server/server.cpp without router mode, MCP,
+// aegis-strata: the server's program. Mirrors llama.cpp's tools/server/server.cpp without router mode, MCP,
 // server-side tools, the web UI and model downloads.
 //
 //   aegis --engine build/bin/strata -m model.gguf [llama-server options] -- <engine options>

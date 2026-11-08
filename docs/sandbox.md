@@ -1,7 +1,7 @@
-# Containment of the engine child, enforced in the front end before `exec`
+# Containment of the engine child, enforced in the server before `exec`
 
-This is implemented: `frontend/strata_sandbox.h`, `frontend/strata_sandbox.cpp` and
-`frontend/tests/sandbox_test.cpp`. It records the design and the reasoning behind it — what was
+This is implemented: `server/strata_sandbox.h`, `server/strata_sandbox.cpp` and
+`server/tests/sandbox_test.cpp`. It records the design and the reasoning behind it — what was
 considered, what was rejected and why each syscall on the list is on it — because none of that is
 recoverable from a BPF program. Every number was measured on the reference machine (see the README) on
 2026-11-08, and the command is given with each so it can be re-derived rather than believed.
@@ -23,16 +23,16 @@ Derived mechanically, not by guessing. Three sources, each re-runnable:
 | `/dev/shm` | `src/core/pinned.cu:89`, `--shared-expert-arena` (`src/program/generate.cpp#--shared-expert-arena`) | MAP_SHARED arena |
 | the exe's own directory | `mmq_kq_loader.cpp` | `dlopen("libstrata_kq.so")` beside the binary |
 
-**(b) The front end's own handover path** — `grep -n GENI frontend/strata_context.cpp`: pictures are
+**(b) The server's own handover path** — `grep -n GENI server/strata_context.cpp`: pictures are
 encoded in the parent and written to `/tmp/aegis-<random>/pictures-XXXXXX`
-(`frontend/strata_context.cpp#open_pictures_file`), whose path goes to the engine on the `GENI` line. **The
+(`server/strata_context.cpp#open_pictures_file`), whose path goes to the engine on the `GENI` line. **The
 child must be able to read `/tmp`** or `--mmproj` breaks. This is the single easiest thing to miss.
 
 **(c) Paths the engine takes as options** — `grep -oE '"--[a-z0-9-]+"' src/program/generate.cpp`
 gives 18 path-taking options. Read: `--model`, `--pack`, `--mtp`, `--expert-profile`, `--ple-gguf`,
 `--embd-gguf`, `--native-dense-gguf`, `--native-head-gguf`, `--control-vector`, `--cvec-dir`,
 `--tokens-file`, `--vision`. Write: `--expert-profile-save`, `--prompt-cache-root`,
-`--shared-expert-arena`, the `--dump-*` family. They are opaque to the front end, which is why the
+`--shared-expert-arena`, the `--dump-*` family. They are opaque to the server, which is why the
 allowlist is derived from the invocation (§5) rather than hardcoded.
 
 **(d) CUDA init's syscall needs.** Not guessed either, and not fully knowable without a GPU run.
@@ -69,7 +69,7 @@ In the child between `fork` and `exec`: `unshare(CLONE_NEWUSER|CLONE_NEWNET|CLON
   and it *hides* rather than denies — a canary outside the tree does not exist, so even `stat` fails.
 - **Against the actor list:** stops a malicious model file and a prompt-injected agent from reaching
   the network or the user's `~/.ssh`; does nothing against ptrace of a sibling process (the parent
-  front end is in the same pid namespace unless we add `CLONE_NEWPID`, which then needs an init
+  server is in the same pid namespace unless we add `CLONE_NEWPID`, which then needs an init
   process and reparenting logic).
 - **Costs:** needs unprivileged user namespaces, which are disabled on hardened and some enterprise
   kernels — so the feature would have to be optional, and an optional containment control enforces
@@ -112,17 +112,17 @@ identity uid/gid maps → a Landlock ruleset (default-deny filesystem, explicit 
 - **Against the actor list:** a malicious model file (parser RCE) and a prompt-injected agent get a
   process with no network, no readable `$HOME` outside the model directory, no writable path except
   `/dev/shm` and what was asked for. It can still *receive* a descriptor over an AF_UNIX socket
-  (`SCM_RIGHTS`) from another process of the same uid, which is the residual egress `SANDBOX-RISKS.md`
+  (`SCM_RIGHTS`) from another process of the same uid, which is the residual egress `security.md`
   §4 describes; AF_UNIX itself cannot be denied because CUDA needs it.
   A tampered CUDA toolkit or driver userspace gets the same, *except* through the GPU ioctl
-  interface, which is not namespaced (see `SANDBOX-RISKS.md`).
+  interface, which is not namespaced (see `security.md`).
 - **Costs:** one new file, measured at 710 lines / 245 statements as written (the rest is comment, the UAPI fallbacks and the non-Linux stub), one `#if defined(__linux__)`, no new dependency, no privilege
   required for the mandatory half, and the netns half degrades to "seccomp only" where userns is
   disabled. Landlock *denies* rather than *hides*, so `stat` still works — path existence remains
   probeable, which is a weaker guarantee than (A) but not one the threat model needs.
 - **Testable:** the probe child reports a distinct outcome per mechanism, so each half can be broken
   independently and seen to fail independently — the seven deliberate breaks that prove it are
-  listed in `frontend/tests/sandbox_test.cpp`'s header.
+  listed in `server/tests/sandbox_test.cpp`'s header.
 
 ### Recommendation
 
@@ -166,14 +166,14 @@ None of them apply here:
    instructions inverts the project's whole premise.
 3. **It would be a build-graph and provenance liability.** The README's rule 1 wants everything
    built from source and rule 2 wants no network during the build; a system `libseccomp` becomes
-   another thing `flake.nix` has to pin and another thing `ldd` reports on the front end.
-   "The front end links zero engine code" is the sentence that
+   another thing `flake.nix` has to pin and another thing `ldd` reports on the server.
+   "The server links zero engine code" is the sentence that
    makes the boundary credible. Adding a shared library to that line to express 34 instructions is
    a bad trade.
 4. **Honest counter-argument, recorded:** hand-written classic BPF is write-once-read-carefully code
    where an off-by-one in a jump offset silently changes the policy. That is mitigated structurally,
    not by care: the filter is built by a loop over a table of syscall numbers (so the jump offsets
-   are not hand-written per entry), and `frontend/tests/sandbox_test.cpp` asserts the *behaviour* of every rule from
+   are not hand-written per entry), and `server/tests/sandbox_test.cpp` asserts the *behaviour* of every rule from
    a child process, which is the only check that can catch a wrong offset.
 
 Landlock needs no library either way — there is no glibc wrapper, so every implementation calls
@@ -196,7 +196,7 @@ This is the more important decision and it is deliberate:
 - The honest cost is that a denylist is **unsound against a syscall we did not think of**. `io_uring`
   is the proof: it can create a socket and connect without calling `socket` or `connect`. That
   lesson generalises to any future multiplexer. The mitigations are the network namespace (which has
-  no syscall-level bypass at all) and the test. This is stated plainly in `SANDBOX-RISKS.md` rather than
+  no syscall-level bypass at all) and the test. This is stated plainly in `security.md` rather than
   argued away.
 
 ---
@@ -233,7 +233,7 @@ any of them.
 
 | Syscall | nr | Reason it must die |
 |---|---|---|
-| `ptrace` | 101 | attach to another process of this user (the front end, the user's shell, an agent) and run code there — outside this filter and outside this Landlock domain. Yama `ptrace_scope=1` on the reference machine already limits it to descendants, but the engine *has* descendants (ggml's gdb helper) and the sysctl is not ours to rely on. |
+| `ptrace` | 101 | attach to another process of this user (the server, the user's shell, an agent) and run code there — outside this filter and outside this Landlock domain. Yama `ptrace_scope=1` on the reference machine already limits it to descendants, but the engine *has* descendants (ggml's gdb helper) and the sysctl is not ours to rely on. |
 | `process_vm_readv` | 310 | read another process's memory — the prompt-and-secrets asset, without ptrace. |
 | `process_vm_writev` | 311 | write another process's memory — code injection without ptrace. |
 | `pidfd_open` | 434 | the handle `pidfd_getfd` needs. |
@@ -267,7 +267,7 @@ any of them.
 |---|---|
 | `execve`, `execveat` | **the filter is installed before `execv`** — denying them would kill the engine at launch. Landlock controls *what* can be executed; seccomp must not control *whether*. |
 | `connect`, `bind`, `listen`, `accept4`, `sendto`, `sendmsg`, `recvmsg`, `setsockopt` | reachable only with a socket fd, and the only obtainable fd is `AF_UNIX`. CUDA's local IPC needs all of them. Denying `connect` outright would break `nvidia-persistenced`/MPS paths that may exist on another box. |
-| `ioctl` | the entire NVIDIA driver interface. Cannot be denied; cannot be meaningfully argument-filtered either, because the NVIDIA request codes are undocumented and their payloads are pointers. See `SANDBOX-RISKS.md`. |
+| `ioctl` | the entire NVIDIA driver interface. Cannot be denied; cannot be meaningfully argument-filtered either, because the NVIDIA request codes are undocumented and their payloads are pointers. See `security.md`. |
 | `mprotect` with `PROT_EXEC`, `memfd_create` | CUDA JITs PTX at runtime, so executable pages are required. Denying `memfd_create` alone would be theatre while `mprotect` must stay open. |
 | `clone`, `clone3` | threads. `clone3` passes its flags in a **pointer** struct, so `CLONE_NEWUSER` cannot be denied through it, and denying it via `clone`'s scalar `arg0` would be an incomplete control that reads as a complete one. So the nested namespace is reachable and is **not** prevented. What makes it harmless is that everything it could be used *for* is dead: the independent review showed that `clone3(CLONE_NEWUSER\|CLONE_NEWNS)` grants `CAP_SYS_ADMIN` over the new mount namespace, and that the whole new mount API (`fsopen`, `fsconfig`, `fsmount`, `fspick`, `move_mount`, `open_tree`, `mount_setattr`) was reachable. It is now on the kill list below, together with `chroot`. An earlier version of this table claimed "a nested user namespace grants no capability" — that was wrong, and the test now asserts `fsopen` dies. |
 | `prctl`, `seccomp`, `landlock_*` | a *second*, stricter filter can always be added by the child; seccomp filters compose by intersection and can never be relaxed. Denying them buys nothing. |
@@ -311,10 +311,10 @@ paths below are reachable. Rights are per entry.
 | `/proc/self` (resolved to `/proc/<child pid>` at rule time) | read | `/proc/self/{exe,stat,status,statm,io,task,numa_maps}`. **Not all of `/proc`** — see below |
 | `/proc/meminfo`, `/proc/buddyinfo`, `/proc/sys/vm/nr_hugepages` | read | the three global `/proc` files the engine actually reads |
 | `/sys/devices/system/cpu`, `/sys/devices/system/node`, `/sys/fs/cgroup`, `/sys/kernel/mm`, `/sys/dev/block`, `/sys/bus/pci/devices` | read | CPU/NUMA topology, cgroup limits, THP, rotational-disk detection. **Not all of `/sys`** |
-| `/tmp` | read | the `GENI` picture-rows file the parent writes (`frontend/strata_context.cpp#open_pictures_file`). Read-only: the child only consumes it |
+| `/tmp` | read | the `GENI` picture-rows file the parent writes (`server/strata_context.cpp#open_pictures_file`). Read-only: the child only consumes it |
 | the engine executable's `realpath` | read + exec | `execv` of the engine itself happens *after* the filter |
 | the engine executable's directory | read + exec | `dlopen("libstrata_kq.so")` beside the exe (`src/prefill/mmq_kq_loader.cpp:43`) |
-| the shebang interpreter, if the executable starts with `#!` | read + exec | so a script engine (`frontend/tests/fake-engine.py`) still runs. Read in the parent, before `fork`. This is a precise 12-line rule instead of granting all of `/usr/bin` |
+| the shebang interpreter, if the executable starts with `#!` | read + exec | so a script engine (`server/tests/fake-engine.py`) still runs. Read in the parent, before `fork`. This is a precise 12-line rule instead of granting all of `/usr/bin` |
 
 **Narrowing `/proc` matters and is cheap.** Granting read on all of `/proc` would expose
 `/proc/<pid>/environ` and `/proc/<pid>/cmdline` of every process this user runs — an API-key and
@@ -328,7 +328,7 @@ rule on the resolved path is exactly "this process's own `/proc` entry and nothi
 2. Every engine argument (everything after `--`) that contains `/` **and exists**: a file is added as
    itself, a directory as a hierarchy, both read-only, both via `realpath`. This covers `--model`,
    `--pack`, `--mtp`, `--expert-profile`, `--ple-gguf`, `--control-vector`, `--vision` and the rest of
-   §1(c) without the front end needing to know what those options mean.
+   §1(c) without the server needing to know what those options mean.
 3. `--sandbox-allow-read PATH` and `--sandbox-allow-write PATH`, repeatable, for anything the
    heuristic misses — in particular the *write* options (`--expert-profile-save`,
    `--prompt-cache-root`, `--shared-expert-arena` outside `/dev/shm`), whose targets may not exist yet
@@ -393,7 +393,7 @@ the argument predicates from any syscall that turns out to be hot.
 
 ## 7. Where the filter is installed, and what is safe there
 
-The code runs in the child between `fork` and `execv` — `frontend/engine.hpp#::execv(` today. That
+The code runs in the child between `fork` and `execv` — `server/engine.hpp#::execv(` today. That
 child is single-threaded (fork gives one thread) but inherits the parent's heap locks, so **nothing
 that allocates, takes a lock, or touches `errno`-reporting machinery may run there**.
 
@@ -436,7 +436,7 @@ correct as that order may change.)
 
 A `pipe2(O_CLOEXEC)` created before `fork`. On failure the child writes one fixed 8-byte record
 `{uint16 stage; uint16 fatal; int32 saved_errno}` with a single `write()` and calls `_exit(126)`. The
-second field is **not** padding: it is what decides whether the front end refuses to start or merely
+second field is **not** padding: it is what decides whether the server refuses to start or merely
 logs a degradation. The
 parent reads it: 8 bytes means "the sandbox failed at this stage with this errno", and the parent
 turns `stage` into a name from a static table and reports
@@ -451,7 +451,7 @@ so nothing is formatted in the child.
 Two states only, never three:
 
 - **Enforced** (default). If `sandbox_available()` says the mechanisms are absent, or `sandbox_plan`
-  cannot resolve a `--sandbox-allow-*` path, or `sandbox_apply` fails at any stage, the front end
+  cannot resolve a `--sandbox-allow-*` path, or `sandbox_apply` fails at any stage, the server
   **exits non-zero before the engine serves anything**. No warning-and-continue. The one documented
   degradation inside the enforced state is a Landlock ABI older than this build knows: unsupported
   *rights* are masked out of the handled set and each one is logged by name. That is sound because
@@ -471,14 +471,14 @@ Landlock cannot run the binary at all, and will run an older release or patch th
 worse than a visible flag. So: exactly one, designed to be impossible to set by accident and
 impossible to miss.
 
-- **`--no-sandbox`, a front-end flag, never an environment variable.** An env var is inherited,
+- **`--no-sandbox`, a server flag, never an environment variable.** An env var is inherited,
   gets set in a systemd unit or a shell rc where no reviewer looks, and does not appear in `ps`. A
   flag appears in `ps`, in the unit's `ExecStart`, and in the user's own shell history.
 - **No middle setting.** There is no `--sandbox=best-effort`. "A verification that cannot run is a
   failure, never a warning" (rule 5) means the only alternative to enforcement is an explicit,
   recorded decision not to enforce.
 - **Loud at startup** — four lines to stderr, unconditionally, not at `LOG_WRN` level where a quiet
-  logger could drop them. The exact text is in `frontend/strata_context.cpp`.
+  logger could drop them. The exact text is in `server/strata_context.cpp`.
 - **Visible over the API.** `/props` and `/health` gain `"sandbox": "enforced" | "enforced-no-netns" | "off" | "unavailable"`.
   This is the part that makes the opt-out *testable*: `e2e.sh` can assert the field, and an operator
   or an agent can check at runtime whether the server it is talking to is contained. A security
@@ -516,9 +516,9 @@ meaningless there. It does **not** belong behind an `#ifdef` in this file.
 
 ---
 
-## 9. Not built: the same containment for the front end
+## 9. Not built: the same containment for the server
 
-The gap this leaves is in the **front end**, and it is deliberate: `aegis` imports `connect` and
+The gap this leaves is in the **server**, and it is deliberate: `aegis` imports `connect` and
 `getaddrinfo` from
 cpp-httplib's unused client half. The parent cannot have a netns (it must bind 127.0.0.1) and cannot
 have the child's Landlock policy (it reads the GGUF, the chat template, `--mmproj`), but it *can*
@@ -527,7 +527,7 @@ install a second, tiny seccomp filter **after `ctx_http.start()` has bound and l
 of them once its listener exists, because new connections arrive through `accept4` on the fd it
 already holds.
 
-That would make THREAT_MODEL.md's invariant 1 structural for *both* processes, and is roughly 20 lines
+That would make security.md's invariant 1 structural for *both* processes, and is roughly 20 lines
 reusing this file's filter builder. It is left out on purpose rather than forgotten: it is a different
 process with a different failure mode, it needs its own end-to-end assertions (does cpp-httplib ever
 create a socket per connection? the test harness can answer that without a GPU), and folding it in
@@ -538,9 +538,9 @@ would make the existing test ambiguous about which process was contained.
 
 ## 10. What was measured, and what was not
 
-`frontend/strata_sandbox.cpp` and `frontend/tests/sandbox_test.cpp` compile clean under
+`server/strata_sandbox.cpp` and `server/tests/sandbox_test.cpp` compile clean under
 `g++ -std=c++20 -Wall -Wextra`. Reproduce the block below with `make test`, which builds and runs
-`build-frontend/bin/sandbox_test`; it was last re-derived on the reference machine on 2026-11-08. The
+`build-server/bin/sandbox_test`; it was last re-derived on the reference machine on 2026-11-08. The
 path count is a property of the invocation, not of the code — a real model directory changes it — so
 treat it as this run's number, while the 75-instruction filter size is fixed by the code and is
 checked against the built filter by `tools/check_docs.py`.
@@ -566,9 +566,9 @@ works, and `ptrace` and `io_uring_setup` end the process with `SIGSYS`. The `pro
 same binary with `enabled = false`: every result inverts, which is what makes the rest
 non-vacuous.
 
-Deliberate breaks 2, 4 and 5 of the seven listed in `frontend/tests/sandbox_test.cpp`'s header were
+Deliberate breaks 2, 4 and 5 of the seven listed in `server/tests/sandbox_test.cpp`'s header were
 each applied and each produced exactly its named failure and nothing else.
 
 **What this block does not cover: CUDA, a GPU, a model file, or the real engine.** Those were
 exercised separately against the engine on the reference machine, and the list of what remains
-unknown is in `docs/SANDBOX-RISKS.md`.
+unknown is in `security.md`.

@@ -17,7 +17,7 @@ please do not attach payloads.
 
 **What to expect.** This is a one-person project. There is no response-time guarantee, no SLA and no
 bug bounty. Reports will be read and answered, and anything confirmed will be written down in public
-once it is fixed, or written down in `THREAT_MODEL.md` as a known gap if it is not going to be fixed
+once it is fixed, or written down in `docs/security.md` as a known gap if it is not going to be fixed
 soon.
 
 **Supported versions.** Only the current `main`. There are no releases and nothing is backported.
@@ -26,7 +26,7 @@ soon.
 
 In scope:
 
-- The front end (`frontend/`): the HTTP surface, request parsing, the engine adapter and the
+- The server (`server/`): the HTTP surface, request parsing, the engine adapter and the
   child-process boundary.
 - The build glue in this repository: `CMakeLists.txt`, `cmake/`, `Makefile`.
 - The engine source as this tree ships it, including how it parses GGUF and pack files.
@@ -53,48 +53,34 @@ Out of scope:
   design; a long request blocks the next one. That is documented, not a flaw.
 - Binding the server to a non-loopback address without `--api-key`. It defaults to `127.0.0.1`, and
   overriding that is a configuration you chose. We would like it to refuse that combination — see
-  invariant 3 in `THREAT_MODEL.md` — but today it does not, and that gap is already recorded.
+  invariant 3 in `docs/security.md` — but today it does not, and that gap is already recorded.
 - Windows code paths. Upstream's Windows branches are still in the tree but are never compiled or
   run here.
 - The model's own behaviour: jailbreaks, bad output, and prompt injection of the agent that calls
   us. The engine's job is to run the weights it is given.
 - Upstream projects' installers, release binaries and update feeds. Report those to Strata,
-  PolyStrata or UnbiasedStrata. `THREAT_MODEL.md` records why this fork does not use them.
+  PolyStrata or UnbiasedStrata. `docs/security.md` records why this fork does not use them.
 
-## The kernels are unaudited
+## What is already known to be weak
 
-Stated plainly, because the rest of this document means less without it:
+Everything below is written up with its evidence in `docs/security.md`, and this is the short form:
 
-**The CUDA kernels in this tree have not been audited, by us or by anyone we know of.** They are the
-bulk of the engine's code. Building them from source proves their provenance — they are the code in
-this repository, which is upstream's code, and `git diff` shows every change — but provenance is not
-correctness. A memory-safety bug or a numerical error in a kernel would not be caught by anything
-this project currently does.
-
-Nor can it be, cheaply: checking a kernel's numerical correctness needs GPU runs against real
-weights, compared against a reference implementation. Upstream has done some of that work; this fork
-has not reproduced it.
-
-There has been **no external security audit** of this project, and none is planned.
-
-## Other known gaps
-
-These are not secrets; they are written up with their evidence in `THREAT_MODEL.md`:
-
-- "The server makes no outbound connection" is now enforced for the **engine** child — a network
-  namespace, a seccomp filter and a Landlock allowlist, installed before `exec` and covered by a
-  GPU-free test. It is still only inspection for the **front-end** process, which serves HTTP and
-  imports `connect`; a filter for it is designed and not built.
-- A container is a soft boundary for the GPU, because the NVIDIA kernel driver's ioctl interface is
-  not namespaced.
-- Builds are not reproducible yet, so a published hash cannot yet be independently recreated.
-- The llama.cpp submodule contains a web-UI asset fetcher that checks a downloaded archive against a
-  checksum fetched from the same server. It is forced off here and the sandboxed build proves it is
-  unreachable, but it should stay off.
+- **The CUDA kernels have not been audited**, by us or by anyone we know of. They are most of the
+  code here. Building from source proves where they came from, not that they are correct, and
+  checking them properly needs GPU runs against real weights compared with a reference. There has
+  been no external security audit of this project and none is planned.
+- **The engine cannot reach the network; the server can.** The engine child gets a network
+  namespace, a syscall filter and a filesystem allowlist, installed before it starts and covered by
+  a test that needs no GPU. The server process that serves HTTP is not filtered the same way. That
+  is designed and not built.
+- **The GPU is a soft boundary.** The NVIDIA driver's ioctl interface is not namespaced, so a
+  process with access to the device has a wide path into the driver that this kind of sandbox does
+  not close.
+- **Builds are not yet reproducible**, so a published hash could not yet be independently recreated.
 
 ## Distribution
 
-Source only. There are no release binaries and there never will be — that is hard rule 1 in this
+Source only. There are no release binaries and there never will be — that is a rule of this
 project, not a current state of affairs. Verification hashes for builds of a given commit are
 intended to be published once builds are reproducible; until then there is nothing to check a binary
 against, which is another reason not to trust one.

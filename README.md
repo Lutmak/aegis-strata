@@ -1,127 +1,104 @@
 # aegis-strata
 
-aegis-strata serves one large language model over an OpenAI-compatible HTTP API on localhost, for a
-coding agent to use. You compile it yourself; there is nothing else to it — no installer, no model
-downloader, no web UI, no desktop app.
+Run one large language model on your own machine, behind an OpenAI-compatible HTTP API on
+localhost. Point your coding agent at it instead of a cloud provider.
 
-It is a fork of [UnbiasedStrata](https://github.com/robertkarl/UnbiasedStrata), which forks
-[PolyStrata](https://github.com/simplexai-labs/PolyStrata), which forks
-[Strata](https://github.com/Niko1221/Strata). It keeps their CUDA engine, which is the only reason a
-model far larger than the card's memory runs on a 12 GB card, and deletes almost everything around
-it.
+It runs **Qwen3.8-Flash-Next** on a single NVIDIA GPU. The model is far larger than any consumer
+card's memory, so most of it stays in system RAM and only the parts each token needs are streamed to
+the GPU. On a 12 GB card it answers at about 89 tokens a second.
 
-## What it refuses to do
+You compile it yourself. There is no installer, no download button, no web interface, no account.
 
-This is the point of the project, so it comes before the build instructions.
+## Why you might pick this one
 
-1. **No prebuilt binary of this project, ever.** Nothing is downloaded and executed. Nothing is
-   vendored as a binary. There is no `--prebuilt` flag and no code path that fetches an engine.
-   Distribution is source only. Any file claiming to be an aegis-strata release binary is not from
-   this project. The rule is about what this project ships and runs, and it has exactly one
-   exception, named here rather than left implicit: the toolchain. A compiler, a CUDA toolkit and
-   CMake are prebuilt binaries that your package manager or Nix installed, and every build of every
-   project trusts them. `THREAT_MODEL.md` lists that among what is not covered.
-2. **No network during the build.** Cloning the repository and its submodule needs network, of
-   course. Compiling it does not, and that is measured rather than asserted: the whole build
-   completes inside `bwrap --unshare-net`, in a network namespace holding only `lo`, with egress
-   checked dead first (TCP to a public host refused, UDP to a public resolver unreachable).
-3. **No network at run time.** No telemetry, no update check, no model fetch, no version ping. The
-   server opens a listening socket and nothing else. For the engine this is *enforced*, not just
-   intended: the front end runs it in a network namespace holding only `lo`, behind a seccomp filter
-   that refuses every socket domain but `AF_UNIX`, and refuses to start it if that cannot be
-   installed. `make test` proves it with no GPU. The process that serves HTTP is not yet filtered the
-   same way — `THREAT_MODEL.md` says exactly how far the claim goes.
-4. **No Python between a request and a token.** The server is C++. Python is used only for offline
-   work you run yourself: preparing model packs, and the test suite's fake engine.
-5. **No privilege escalation.** The build never calls `sudo` and never installs a system package.
-   It writes the build directory, and one temporary file while it probes for a compiler nvcc
-   accepts. If a dependency is missing it stops and names it.
-6. **Every download is pinned and verified, or it does not happen.** The llama.cpp submodule is
-   pinned by commit hash. A verification that cannot run is a failure, never a warning.
-7. **Code this build can reach is deleted, not disabled.** An `OFF` build option is still code that
-   ships, still code a stray flag can turn on, and still code a reviewer has to read, so the engines,
-   backends and model families this fork does not serve are gone rather than switched off. Two trees
-   are kept on purpose and this is the whole of the exception: `metal/`, which no option here can
-   compile — it is a separate macOS-only project that nothing in this build references — and the ROCm
-   path, which `-DSTRATA_ENABLE_HIP=ON` would compile against a toolkit that is not installed here.
-   Neither has been built or run on the reference machine, so neither is supported. Both were audited
-   against the rules above, and the two files that broke them are deleted: a Windows script that
-   downloaded an unpinned prebuilt toolchain from a nightly index and then executed it, and a macOS
-   installer that fetched models and opened a browser. What remains compiles nothing and fetches
-   nothing.
+This began as a fork of an existing engine, and most of the work since has been taking things out
+and locking down what was left. The differences that matter to you:
 
-Rules 1, 2 and 5 exist because the parent projects break them. `THREAT_MODEL.md` says where and how.
+**Nothing runs on your machine that you did not compile.** The projects this came from offer a
+quicker path: download a prebuilt engine, or copy a ready-made weights pack from someone's file
+host, and run it. That means executing a binary you cannot inspect, and one of those projects
+installs system packages with `sudo` along the way. All of it is gone here. You build from source,
+and if you ever see a file claiming to be an "aegis-strata release binary", it is not from this
+project.
+
+**The part that reads your prompts cannot reach the network.** The engine runs as its own process
+inside an empty network namespace — not firewalled, but placed somewhere no network exists — behind
+a kernel filter that refuses to create any socket except a local one. Its view of your filesystem is
+cut down to the model files and the libraries it loads, so it cannot read `~/.ssh` or your shell
+history even if something goes wrong inside it. If any of that cannot be set up, the server refuses
+to start the engine rather than starting it unprotected. This does not stop your agent from
+searching the web — see below, because it is the question everyone asks first.
+
+**It does one thing.** The engine it came from handles six model families across five GPU backends,
+with a Windows installer and a web UI. That is all removed. What is left is about a quarter of the
+code: a quarter as much to go wrong, and a quarter as much to read if you want to check it yourself.
+
+**The claims in these documents are tested.** `make test` runs the containment checks on any Linux
+box, with no GPU and no model file. Part of that suite also checks that every file path and number
+quoted in the documentation still matches the code, and fails when one does not.
+
+## What you need
+
+Linux on x86-64, an NVIDIA GPU with its driver, a CUDA toolkit, CMake 3.24 or newer, a C++20
+compiler, `make` and `git`. The tests also need `python3` and `curl`.
+
+A 12 GB card is enough. You also need plenty of system RAM — the model occupies about 43 GB while
+running.
 
 ## Build
-
-Needs: Linux x86-64, an NVIDIA GPU and its driver, a CUDA toolkit, CMake 3.24 or newer, a C++20
-compiler, make and git. `make test` additionally needs `python3` and `curl`.
 
 ```
 git clone https://github.com/Lutmak/aegis-strata && cd aegis-strata
 git submodule update --init
-make build CUDA_ARCHS=86          # 86 = RTX 30 series; use your card's compute capability
+make build CUDA_ARCHS=86     # 86 is RTX 30-series; use your card's compute capability
 make test
 ```
 
-`make build` produces three files in `build/bin/`:
+Three files land in `build/bin/`:
 
-- `strata` — the inference engine.
-- `libstrata_kq.so` — K-quant matmul kernels, opened by the engine next to its own binary when a
-  model needs them.
-- `aegis` — the front end, which serves the HTTP API and runs the engine as a child process.
+| | |
+|---|---|
+| `aegis` | the server: serves the HTTP API and starts the engine as a child process |
+| `strata` | the engine: does the inference on the GPU |
+| `libstrata_kq.so` | extra matrix kernels the engine loads for some quantisation formats |
 
-`make frontend` builds `aegis` alone, without CUDA, for a laptop or a CI box. `make test` runs the
-front end against `frontend/tests/fake-engine.py`: no GPU and no model file needed, so the tests can
-run anywhere.
+Two processes instead of one is deliberate. The server has to hold a listening socket, so it cannot
+be cut off from the network. The engine has no such need, so it is the one that gets locked down.
+Splitting them is what makes that possible.
 
-**About compilers.** nvcc accepts only some GCC versions, and mixing two libstdc++ generations fails
-at the link. The Makefile probes `g++-15`, `g++-14`, … against nvcc and hands CMake the newest one
-nvcc accepts; `HOSTCXX=/usr/bin/g++-14 make build` overrides the probe. It also drops CUDA
-architectures the installed nvcc rejects, with a note, instead of failing.
+`make server` builds `aegis` alone without CUDA, which is handy on a laptop. `make test` needs no GPU
+and no model, so it runs anywhere.
 
-**What was built here.** nvcc 13.4.92, cmake 4.4.5, `CUDA_ARCHS=86`. The probe selected g++-15; the
-box's default gcc 16.2 is rejected by nvcc and would fail. A clean build takes 2 minutes 44 seconds
-and compiles 304 object files.
+**On compilers.** `nvcc` accepts only certain GCC versions, and mixing two of them breaks the link.
+The Makefile tries `g++-15`, `g++-14` and so on until one works, and says which it chose. Override
+with `HOSTCXX=/usr/bin/g++-14 make build`.
 
-## Model files
+## Get the model
 
-The only supported model is **Qwen3.8-Flash-Next**, in the GSQ-RCO IQ3_XXS quantization. The engine
-needs three things: the two GGUF shards, a *pack* directory built from shard 1, and an MTP draft
-directory.
+Only **Qwen3.8-Flash-Next** in the GSQ-RCO IQ3_XXS quantisation is supported.
 
-Download the shards on a machine that has network, check their SHA-256, and copy them to the
-inference box. Neither the build nor the server fetches a model.
+Download the two GGUF shards on a machine with network access, check their SHA-256 sums, and copy
+them across. Nothing here downloads a model for you.
 
-Then build the pack and the draft directory locally:
-
-```
-python3 tools/iq_pack.py --gguf <shard1> --out <pack>
-python3 tools/mtp_fetch.py fetch  --out <mtp>
-python3 tools/mtp_fetch.py verify --out <mtp>     # checks every tensor's hash; must exit 0
-python3 tools/mtp_pack.py --src <mtp> --experts q2_0 --out <mtp>/mtp-q2_0.gguf
-python3 tools/mtp_rt.py --gguf <mtp>/mtp-q2_0.gguf --out <mtp>/rt
-cp data/draft_vocab.bin <mtp>/rt/draft_vocab.bin
-```
-
-These tools need `numpy`, `regex`, `pyyaml` and `tqdm`. `tools/requirements.txt` is a fully
-hash-pinned lock, so install it into a virtualenv and let the hashes be checked:
+Then prepare the two directories the engine needs:
 
 ```
 uv venv .venv && uv pip install --python .venv/bin/python -r tools/requirements.txt
+
+python3 tools/iq_pack.py  --gguf <shard1> --out <pack>
+python3 tools/mtp_fetch.py fetch  --out <mtp>
+python3 tools/mtp_fetch.py verify --out <mtp>      # must exit 0 — do not skip this
+python3 tools/mtp_pack.py --src <mtp> --experts q2_0 --out <mtp>/mtp-q2_0.gguf
+python3 tools/mtp_rt.py   --gguf <mtp>/mtp-q2_0.gguf --out <mtp>/rt
+cp data/draft_vocab.bin <mtp>/rt/draft_vocab.bin
 ```
 
-`mtp_fetch.py` reads tensors from Hugging Face at a pinned model revision, and `verify` hash-checks
-every one and exits 3 listing any that fail; do not skip it. All of this is offline tooling you run once by hand — not part of the build, and not
-part of the server.
+`tools/requirements.txt` pins every package by hash, so a tampered download fails the install rather
+than running. `mtp_fetch.py verify` checks each tensor's hash and exits 3 listing any that fail.
 
-Upstream offers a shortcut: copy a prebuilt pack from a published repository instead of building
-one. Do not use it. That is exactly the untrusted-artifact path this project exists to remove, and
-it was refused here.
+This is one-off work you run by hand. It is not part of the build and not part of the server.
 
 ## Run
-
-One working invocation, on a 12 GB card:
 
 ```
 build/bin/aegis --engine build/bin/strata \
@@ -137,128 +114,143 @@ build/bin/aegis --engine build/bin/strata \
      --pool-workers 15 --gpu 0
 ```
 
-`-m` names the GGUF the vocabulary and chat template are read from; the front end loads no tensors
-from it. Everything before `--` is a llama-server option (`--host`, `--port`, `--api-key`, `--alias`,
-`--temp`, `--reasoning-format`, `--sse-ping-interval`, …). Everything after `--` goes to the engine,
-which is started as a child process with `--serve` appended.
+Options before `--` belong to the server; options after `--` go to the engine. `-m` is only where the
+vocabulary and chat template are read from — the server loads no model weights.
 
-Point your agent at `http://127.0.0.1:8080/v1`. Thirteen routes are served: `/v1/chat/completions`
-(streaming and not), `/v1/completions`, `/v1/models`, `/v1/health`, the same four without the `/v1`
-prefix, `/completion` (singular, llama.cpp's own), `/health`, `/props`, `/tokenize`,
-`/detokenize` and `/apply-template`.
+Point your agent at `http://127.0.0.1:8080/v1`. Thirteen routes are served:
+`/v1/chat/completions` (streaming or not), `/v1/completions`, `/v1/models`, `/v1/health`, the same
+four without the `/v1` prefix, and `/completion`, `/health`, `/props`, `/tokenize`, `/detokenize`
+and `/apply-template`.
 
-Four details in that invocation that upstream's README gets wrong or sizes for a 24 GB card:
+Four choices in that command line matter on a 12 GB card, and differ from what you may have seen
+elsewhere:
 
-- **`--mtp /models/mtp/rt`, not `/models/mtp`.** The engine looks for `dense.txt` directly inside the
-  path you give. Upstream's README points at the parent directory, which fails hard at load.
-- **`--ple-io direct`** (the default) rather than upstream's `--ple-io ram`. `ram` locks the whole PLE
-  table into RAM, and the engine already peaks at 42.7 GiB of the reference machine's 62 GiB; `direct` reads the
-  table from SSD instead.
-- **`--kv-grow`** rather than a fixed `--kv-resident`, so the K/V cache claims VRAM as the context
-  fills it instead of all of it at load. Peak VRAM below is 11,670 MiB of the card's 12,288, so
-  there is nothing to spare.
-- **`--gpu 0`** stated explicitly, because the reference machine has a second GPU driving the display and the
-  engine should not touch it.
+- **`--mtp .../rt`**, not the directory above it. The engine looks for `dense.txt` directly inside
+  the path you give, and fails at load otherwise.
+- **`--ple-io direct`** reads a large lookup table from SSD as it goes. The alternative locks that
+  table in RAM, and the engine is already using about 43 GB of 62 GB.
+- **`--kv-grow`** lets the context cache claim GPU memory as the conversation fills it, rather than
+  reserving all of it at load. Peak use is 11,670 MiB of 12,288 — there is nothing spare.
+- **`--gpu 0`** stated explicitly, in case a second GPU is driving your display.
 
-## Measured, on the reference machine
+## The engine is offline. Your agent is not.
 
-Every measurement in this repository was taken on one machine, and the documents call it **the
-reference machine**:
+This is the part people get wrong, so it is worth being plain about.
+
+**Web search still works.** When the model decides to look something up, it does not open a
+connection. It writes out a tool call as text. That text travels back to your agent, **your agent**
+runs the search with its own network access, and the result arrives in the next request as more
+text. Deciding to use a tool and running it are two different jobs, and running it was always the
+client's. Nothing here changes that, so searching, fetching a page and reading your repository
+behave exactly as they would against a cloud provider.
+
+**What the engine cannot do is reach the network itself.** It has no reason to: it takes a prompt
+and returns tokens. The binary links no network code at all — `nm -D --undefined-only` on the
+engine finds no `connect`, `socket` or `getaddrinfo`, and the same command on the server finds
+seven. The containment is there for the case where something goes wrong inside the engine: a
+malformed GGUF, a bug in a CUDA kernel, a flaw in the pack parser. Code that gets control there
+still cannot open a socket to send your prompts somewhere, and still cannot read `~/.ssh`. That
+turns "it has no network code today" into "it cannot acquire any", which is a different and more
+durable claim.
+
+So the boundary is between the two processes, not between the model and the world:
+
+| | network | contained |
+|---|---|---|
+| your agent | yes | no — it is your program, not ours |
+| `aegis`, the server | yes, it holds the listening socket | not yet (see `docs/security.md`) |
+| `strata`, the engine | no | yes |
+
+**If you want the model cut off from the web**, that is a setting in your agent — stop giving it a
+search tool. This server cannot do it for you. By the time a tool call reaches your agent, the
+server is no longer in the conversation and never sees whether the tool ran.
+
+The containment is on by default and these are the only switches:
 
 | | |
 |---|---|
-| GPU | NVIDIA RTX 3080 Ti, 12,288 MiB, `sm_86`, driver 615.78.08 |
-| CPU / RAM | AMD Ryzen 9 7900X (24 threads), 62 GiB |
-| OS / kernel | Arch Linux, 7.2.14-arch1-1 |
-| CUDA | nvcc 13.4 |
-| LSM / sysctl | `capability,landlock,lockdown,yama,bpf`; `yama.ptrace_scope = 1` |
+| *(default)* | the engine is contained, and the server refuses to start it if that cannot be set up |
+| `--no-sandbox` | start the engine uncontained; prints a warning saying exactly that |
+| `--sandbox-allow-read PATH` | also let the engine read this path, repeatable |
+| `--sandbox-allow-write PATH` | also let it write there, repeatable |
 
-A number below is that machine's, not a promise about yours. Qwen3.8-Flash-Next GSQ-RCO
-IQ3_XXS, the invocation above:
+`GET /props` reports which of those you actually got, as `sandbox`.
 
-| | |
-|---|---|
-| Load to ready | 17–18 s |
-| Time to first token, 13-word prompt | 0.71 s |
-| Time to first token, ~7,100-token prompt | 2.84 s (about 2,500 tok/s prefill) |
-| Decode, streamed | 89–92 tok/s; 103 tok/s with a fully cached prompt |
-| 128-token request, end to end | 62–65 tok/s cold, 100–105 tok/s warm (this includes reading the prompt) |
-| 4,061-token prompt, 64 tokens out | ~25 tok/s end to end |
-| Peak VRAM | 11,670 MiB of 12,288 |
-| Peak engine RSS | 42.7 GiB of 62 |
-| Context | 32,768, with `--kv int8` |
+## What it will not do
 
-These are from one box, one model file and one set of flags. They are not a benchmark against any
-other engine.
+- Download or run a binary it did not compile. The single exception is your toolchain: the compiler
+  and CUDA are prebuilt binaries, as they are for every build of every project.
+- Touch the network during a build, or at any point while serving. No telemetry, no update check, no
+  model fetch.
+- Run Python between a request arriving and a token coming back. The server is C++; Python is only
+  for the offline model preparation above.
+- Ask for `sudo`, or write anything outside the build directory.
+- Ship code it cannot run. Unused engines, backends and model families were deleted rather than
+  switched off, because a disabled code path still ships and still has to be read by anyone
+  reviewing it.
 
 ## What is not supported
 
-- **Intel Arc / SYCL.** Removed from the tree.
-- **The DeepSeek-V4.1 engine.** Removed. DeepSeek-V4.1 needs roughly 225 GiB on fast storage, which
-  the development box does not have, so it is deferred rather than maintained untested.
-- **Every other model family** — Qwen3.6 included — and the multi-model engine that served them
-  (`strata-poly`). Removed. Qwen3.8-Flash-Next is the only model this serves.
-- **Windows.** Upstream's Windows branches are still in the tree. Nothing here builds or tests them.
-  Treat Windows as unsupported.
-- **macOS / Apple Silicon (Metal) and AMD / ROCm.** Upstream's code for both is kept, unmodified
-  except for the two deletions rule 7 names. Neither has been built or run here, so neither is
-  supported — it is just not deleted. If you get one working, say so.
-- **No web UI, no installer, no model downloader, no update mechanism, no image generation.** None of
-  these will be added.
+- **Any model but Qwen3.8-Flash-Next.** The other families, and the multi-model engine behind them,
+  were removed.
+- **Windows**, **Intel Arc / SYCL**, and multi-GPU setups.
+- **macOS / Metal and AMD / ROCm.** The source for both is still here, unchanged from upstream, but
+  neither is built or tested and the normal build cannot compile either. If you get one working, say
+  so.
+- No web interface, installer, model downloader, auto-update or image generation. None are planned.
 
-## Known limits
+## Speed and memory
 
-- **`tool_choice=required` does not work**, and neither does anything else that needs constrained
-  decoding (`json_schema`, grammars). The engine samples inside its own process and exposes no logits
-  across the process boundary, so a grammar cannot constrain it. The request is still served and the
-  output parser still runs; the server logs a warning instead (see the grammar check in
-  `frontend/strata_context.cpp`). Agents that do prompt-based tool calling work. Agents that
-  need constrained decoding do not.
-- **One request at a time.** There is no parallel serving.
-- **The engine is sandboxed, which means its filesystem is an allowlist.** The paths named in the
-  invocation are allowed automatically; anything else the engine needs to read or write has to be
-  given with `--sandbox-allow-read` or `--sandbox-allow-write`. A path you pass to one of those flags
-  that cannot be resolved stops startup rather than being skipped; an engine argument that looks like
-  a path and does not exist is only noted in the log, because the engine may mean to create it. `--no-sandbox` turns the whole thing off behind a loud banner.
-  This is Linux-only; on macOS there is no sandbox and the server says so.
-- **The model thinks a lot.** Qwen3.8-Flash-Next's chat template sets reasoning effort to "xhigh", so
-  the model spends heavily before it answers. With a small `max_tokens` you can get
-  `finish_reason: length`, an empty `content`, and the entire response in `reasoning_content`. Give
-  it room.
-- **Builds are not yet reproducible.** Pinning the toolchain so that two builds of the same commit
-  produce the same hashes is planned work, not a property this project has today.
+Measured on one machine — RTX 3080 Ti (12 GB), Ryzen 9 7900X, 62 GB RAM, Arch Linux — using the
+command above. These are that machine's numbers, not a promise about yours, and not a comparison
+against any other engine.
+
+| | |
+|---|---|
+| Load until ready | 16–18 s |
+| Reading your prompt | ~85 tokens/s |
+| Writing the answer | ~89 tokens/s |
+| GPU memory at peak | 11,670 MiB of 12,288 |
+| System RAM at peak | 43 GB |
+| Context | 32,768 tokens with `--kv int8` |
+
+Turning the engine's containment off made no measurable difference — 88.5 against 89.0 tokens a
+second across several runs — so the protection costs you nothing.
 
 ## Security
 
-The CUDA kernels are the bulk of the engine, and they are **unaudited**. Compiling them ourselves
-proves where they came from; it does not prove they are correct or safe. Nobody has reviewed them,
-including us. There has been no external security audit of anything here.
+`SECURITY.md` is how to report a problem. `docs/security.md` is the long version: what an attacker
+can and cannot do, how the containment is built, and the list of things it does *not* protect you
+from. The GPU driver interface, for one, is a wide path that no sandbox of this kind closes.
 
-`THREAT_MODEL.md` states what this project protects, what it does not, and which of its own
-invariants are enforced versus merely intended. No parent project has one. `SECURITY.md` says how to
-report a vulnerability.
+The engine's CUDA kernels are inherited and unaudited. They are most of the code here, and building
+them from source proves where they came from, not that they are correct.
 
-## Credit and licence
+## If you are a coding agent
 
-Every project this is built from is MIT licensed. The work below is other people's:
+- Build with `make build CUDA_ARCHS=<arch>`, test with `make test` (no GPU needed).
+  `make test-engine` builds and runs the engine's own suite, which does need a GPU.
+- `server/` is the HTTP server. `src/` and `include/` are the inference engine. `tools/` is offline
+  model preparation. The server links no engine code, and that boundary is the point — do not cross
+  it.
+- Before adding a sentence to any document here, ask whether a change to the code alone could make
+  it false. If it could, cite text you can `grep` for rather than a line number, and run
+  `python3 tools/check_docs.py` — it fails on a broken reference.
+- Do not add anything that downloads and runs a binary, reaches the network while serving, or puts
+  Python in the serving path.
 
-- **Strata** — [Niko1221/Strata](https://github.com/Niko1221/Strata). The engine and its CUDA kernels
-  originate here.
-- **PolyStrata** — [simplexai-labs/PolyStrata](https://github.com/simplexai-labs/PolyStrata), tag
-  `v0.1.45-poly.1`, commit `d0cd84dc`. The base tree, and the expert-streaming architecture that
-  makes this run on a small card.
-- **UnbiasedStrata** — [robertkarl/UnbiasedStrata](https://github.com/robertkarl/UnbiasedStrata),
-  commit `ff19037a`. The C++ front end, the first round of deletions, and this build system. It also
-  publishes no release binaries at all, which is the practice this fork keeps.
-- **llama.cpp / ggml** — the ggml authors, via the `robertkarl/llama.cpp` fork pinned by commit in
-  `third_party/llama.cpp`. The tokenizer, the Jinja chat templates, the chat-format parsers, the HTTP
-  server code and the image encoder are theirs, compiled from the submodule unmodified.
-- **Qwen3.8-Flash-Next** is by the Qwen team. The IQ3_XXS GSQ-RCO file is
-  [ISTA-DASLab](https://huggingface.co/ISTA-DASLab)'s. Model files carry their own licences, which are
-  not MIT.
+## Where this came from
 
-The first commit in this repository is UnbiasedStrata `ff19037a` imported unmodified, and its tree
-hash is identical to upstream's. So `git diff <that commit> HEAD` is the complete and permanent
-record of what this fork changed.
+A fork of [UnbiasedStrata](https://github.com/robertkarl/UnbiasedStrata), which forked
+[PolyStrata](https://github.com/simplexai-labs/PolyStrata), which forked
+[Strata](https://github.com/Niko1221/Strata). The CUDA engine is theirs and is the reason any of
+this works. The first commit is their code exactly as it was, and every commit after it is this
+fork's own work, so `git diff 39cab36 HEAD` is the entire difference with nothing hidden in
+between.
 
-This repository is MIT licensed; see [LICENSE](LICENSE).
+llama.cpp is vendored as a pinned submodule and supplies the HTTP layer, the tokenizer and the chat
+template. Model weights carry their own licences, which are not this one.
+
+## Licence
+
+MIT. See [LICENSE](LICENSE).

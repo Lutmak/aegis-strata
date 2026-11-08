@@ -4,7 +4,7 @@
 #   git clone <repo> && cd <repo>
 #   git submodule update --init
 #   make build                      # build/bin/{strata,libstrata_kq.so,aegis}
-#   make test                       # the front end against a fake engine; no GPU needed
+#   make test                       # the server against a fake engine; no GPU needed
 #
 BUILD_DIR  ?= build
 # CUDA archs: GTX 10 (61), RTX 20 / GTX 16 (75), RTX 30 (86), RTX 40 (89).  Any arch below 75 turns on upstream's
@@ -18,7 +18,7 @@ ifeq ($(NVCC),)
     $(error nvcc not found on PATH or in /usr/local/cuda/bin; install a CUDA 12.x toolkit or set NVCC=/path/to/nvcc)
   endif
 endif
-# Everything below that runs nvcc is skipped when there is none (a laptop running `make frontend` or `make test`).
+# Everything below that runs nvcc is skipped when there is none (a laptop running `make server` or `make test`).
 ifneq ($(NVCC),)
 NVCC_ARCHS := $(shell $(NVCC) --list-gpu-arch 2>/dev/null | sed 's/compute_//' | tr '\n' ' ')
 ifneq ($(NVCC_ARCHS),)
@@ -63,22 +63,22 @@ build: configure
 	cmake --build $(BUILD_DIR) -j $(JOBS) --target $(TARGETS)
 	@echo "built:"; ls -1 $(BUILD_DIR)/bin/strata $(BUILD_DIR)/bin/libstrata_kq.so $(BUILD_DIR)/bin/aegis
 
-# The front end alone, without CUDA: for a laptop or a CI box. Needs only a C++20 compiler and CMake.
-.PHONY: frontend
-frontend:
-	cmake -S . -B $(BUILD_DIR)-frontend -DCMAKE_BUILD_TYPE=Release -DSTRATA_ENABLE_CUDA=OFF -DSTRATA_BUILD_TESTS=OFF \
-	      -DCMAKE_RUNTIME_OUTPUT_DIRECTORY=$(abspath $(BUILD_DIR))-frontend/bin $(CMAKE_EXTRA)
-	cmake --build $(BUILD_DIR)-frontend -j $(JOBS) --target aegis
+# The `aegis` server alone, without CUDA: for a laptop or a CI box. Needs only a C++20 compiler and CMake.
+.PHONY: server
+server:
+	cmake -S . -B $(BUILD_DIR)-server -DCMAKE_BUILD_TYPE=Release -DSTRATA_ENABLE_CUDA=OFF -DSTRATA_BUILD_TESTS=OFF \
+	      -DCMAKE_RUNTIME_OUTPUT_DIRECTORY=$(abspath $(BUILD_DIR))-server/bin $(CMAKE_EXTRA)
+	cmake --build $(BUILD_DIR)-server -j $(JOBS) --target aegis
 
-# The front end's tests, against a fake engine (frontend/tests/fake-engine.py): the adapter's cases (cancel, drain,
-# backpressure, child exit, ERR) and the HTTP surface a coding agent touches (frontend/tests/e2e.sh).  Needs python3
+# The server's tests, against a fake engine (server/tests/fake-engine.py): the adapter's cases (cancel, drain,
+# backpressure, child exit, ERR) and the HTTP surface a coding agent touches (server/tests/e2e.sh).  Needs python3
 # and curl; no GPU and no model.  Runs in the CUDA-free build directory, so it works on the build box and on a laptop.
-test: frontend
-	cmake --build $(BUILD_DIR)-frontend -j $(JOBS) --target engine_test literals_test picture_cache_test sandbox_test
-	$(BUILD_DIR)-frontend/bin/engine_test frontend/tests/fake-engine.py
-	$(BUILD_DIR)-frontend/bin/literals_test
-	$(BUILD_DIR)-frontend/bin/picture_cache_test
-	frontend/tests/e2e.sh $(BUILD_DIR)-frontend/bin/aegis
+test: server
+	cmake --build $(BUILD_DIR)-server -j $(JOBS) --target engine_test literals_test picture_cache_test sandbox_test
+	$(BUILD_DIR)-server/bin/engine_test server/tests/fake-engine.py
+	$(BUILD_DIR)-server/bin/literals_test
+	$(BUILD_DIR)-server/bin/picture_cache_test
+	server/tests/e2e.sh $(BUILD_DIR)-server/bin/aegis
 # The documentation makes checkable claims, so they get checked: file:line citations that resolve,
 # backticked paths that exist, the filter's instruction count and kill list against the code, and quoted
 # log lines that a reader could actually grep for.  No GPU, no model, under a second.
@@ -87,7 +87,23 @@ test: frontend
 # failure -- run earlier, a skip would silently take the rest of the suite with it, which is how a kernel without
 # Landlock used to turn into "no tests ran" rather than "one test skipped".  77 is still a failure and not a pass:
 # a runner that cannot enforce the sandbox must not report green on an untested security control.
-	$(BUILD_DIR)-frontend/bin/sandbox_test
+	$(BUILD_DIR)-server/bin/sandbox_test
+
+# The engine's own test suite: ~135 ctest cases over the CUDA kernels, the GGUF reader, the expert cache and
+# the split/share rules.  It is NOT part of `make build`, which ships three binaries and nothing else -- so
+# without this target ctest registers tests whose executables were never built and reports "Unable to find
+# executable" for every one.  Needs the CUDA toolkit and a GPU; some cases need model fixtures upstream never
+# published and fail honestly rather than skipping.
+.PHONY: test-engine
+test-engine:
+	cmake -S . -B $(BUILD_DIR)-tests -DCMAKE_BUILD_TYPE=Release -DSTRATA_ENABLE_CUDA=ON \
+	      -DSTRATA_NATIVE_EXPERTS=ON -DSTRATA_MMQ_KQUANTS=ON -DSTRATA_Q6K_EXPERTS=ON -DSTRATA_BUILD_TESTS=ON \
+	      "-DCMAKE_CUDA_ARCHITECTURES=$(CUDA_ARCHS)" $(SM60_FLAG) $(PORTABLE_FLAG) $(COMPILER_FLAGS) \
+	      -DCMAKE_CUDA_COMPILER=$(NVCC) \
+	      -DCMAKE_RUNTIME_OUTPUT_DIRECTORY=$(abspath $(BUILD_DIR))-tests/bin \
+	      -DCMAKE_LIBRARY_OUTPUT_DIRECTORY=$(abspath $(BUILD_DIR))-tests/bin $(CMAKE_EXTRA)
+	cmake --build $(BUILD_DIR)-tests -j $(JOBS)
+	cd $(BUILD_DIR)-tests && ctest --output-on-failure
 
 clean:
-	trash $(BUILD_DIR) $(BUILD_DIR)-frontend 2>/dev/null || true
+	trash $(BUILD_DIR) $(BUILD_DIR)-server $(BUILD_DIR)-tests 2>/dev/null || true

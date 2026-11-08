@@ -1,6 +1,6 @@
-// aegis-strata: frontend/picture_cache.hpp without a model.
+// aegis-strata: server/picture_cache.hpp without a model.
 //
-//   c++ -std=c++20 -pthread -I frontend frontend/tests/picture_cache_test.cpp -o picture_cache_test && ./picture_cache_test
+//   c++ -std=c++20 -pthread -I server server/tests/picture_cache_test.cpp -o picture_cache_test && ./picture_cache_test
 //
 // Cases:
 //   1. a miss, then a hit that returns the same rows; the counters
@@ -17,8 +17,8 @@
 #include <thread>
 #include <vector>
 
-using strata_frontend::PictureCache;
-using strata_frontend::PictureRows;
+using aegis::PictureCache;
+using aegis::PictureRows;
 
 static int failures = 0;
 #define CHECK(cond) do { if (!(cond)) { std::fprintf(stderr, "FAIL %s:%d: %s\n", __FILE__, __LINE__, #cond); ++failures; } } while (0)

@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
-# UnbiasedStrata: the front end end to end against the fake engine, with a vocabulary-only GGUF from llama.cpp's
+# UnbiasedStrata: the server end to end against the fake engine, with a vocabulary-only GGUF from llama.cpp's
 # own test models (no GPU, no weights). Checks the HTTP surface a coding agent touches: /health, /v1/models,
 # a non-streaming chat completion, a streaming one, a client that disconnects mid-stream, and an engine error.
 #
-#   frontend/tests/e2e.sh <aegis binary> [model.gguf]
+#   server/tests/e2e.sh <aegis binary> [model.gguf]
 set -u
 BIN=${1:?usage: e2e.sh <aegis> [model.gguf]}
 HERE=$(cd "$(dirname "$0")" && pwd)
@@ -88,7 +88,7 @@ img=$(curl -s -o "$IMG" -w '%{http_code}' "$URL/v1/chat/completions" -H 'content
 check $([ "$img" = 400 ] || [ "$img" = 500 ] || [ "$img" = 501 ] && grep -qi "image" "$IMG" && curl -s "$URL/health" | grep -q '"status":"ok"' && echo 0 || echo 1) "image without --mmproj -> $img: $(j 'd["error"]["message"]' < "$IMG" | cut -c1-80); server alive"
 rm -f "$IMG"
 
-# a control token's text inside a message is text (frontend/literals.hpp, USTRAT-14). The oracle: the rendered prompt
+# a control token's text inside a message is text (server/literals.hpp, USTRAT-14). The oracle: the rendered prompt
 # (/apply-template) tokenized by hand as the server does it, specials parsed except inside the literals that came from
 # the messages, must give the request's usage.prompt_tokens; and that count differs from the whole prompt tokenized
 # with specials parsed, which is what the literals used to become. Three places: user content (a control token, the
@@ -96,7 +96,7 @@ rm -f "$IMG"
 # assistant message in the history whose leading <think> block stays the model's while the literals inside and after
 # it are text.
 # The vocabulary-only GGUF's template has neither tools nor reasoning, so this runs a third server with upstream's
-# Qwen3 template (frontend/tests/data/qwen3-chat-template.jinja: tools through tojson, <think> blocks).
+# Qwen3 template (server/tests/data/qwen3-chat-template.jinja: tools through tojson, <think> blocks).
 TPL_PORT=$((PORT + 2)); TPL_URL=http://127.0.0.1:$TPL_PORT; TPL_LOG=$(mktemp "${TMPDIR:-/tmp}/us2-e2e-tpl-XXXXXX")
 "$BIN" --engine "$HERE/fake-engine.py" -m "$MODEL" --jinja --chat-template-file "$HERE/data/qwen3-chat-template.jinja" --host 127.0.0.1 --port "$TPL_PORT" --alias fake -- --max-context 4096 > "$TPL_LOG" 2>&1 &
 TPL_PID=$!
@@ -115,7 +115,7 @@ def post(path, body):
 def tok(text, special):
     return [t if isinstance(t, int) else t["id"] for t in post("/tokenize", {"content": text, "parse_special": special})["tokens"]] if text else []
 def tok_plain(text):
-    # frontend/strata_context.cpp tokenize_plain: parse_special off; an added token that still matches (one of the
+    # server/strata_context.cpp tokenize_plain: parse_special off; an added token that still matches (one of the
     # literals: the halves are ordinary text) is split in two
     ids = tok(text, False)
     if len(ids) == 1 and text in LITERALS:

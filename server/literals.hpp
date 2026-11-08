@@ -5,7 +5,7 @@
 // become their ids. By then nothing tells the template's <|im_end|> from one a user typed, or from one inside a file
 // an agent read: a pasted chat log ends a turn, "<|image_pad|>" in a document becomes a picture the engine finds no
 // rows for (USTRAT-14). Upstream Strata's Python server had this covered (#537, #554: mark_think_literals in
-// serve/frontend.py); this is that scheme for the C++ front end.
+// serve/server.py); this is that scheme for the C++ server.
 //
 // Before the template renders, every literal (the texts of the vocabulary's control tokens and of its marker-like
 // added tokens: <think>, <tool_call>, ...) inside a message or a tool definition is swapped for a mark, a private-use
@@ -18,7 +18,7 @@
 // the block from the history. The rest of that content is marked like any other.
 //
 // Header-only and free of llama.cpp (the JSON functions are templates over common_json's interface: is_string,
-// get<std::string>, contains, at, items, iteration), so frontend/tests/literals_test.cpp runs it without a model.
+// get<std::string>, contains, at, items, iteration), so server/tests/literals_test.cpp runs it without a model.
 #pragma once
 
 #include <algorithm>
@@ -29,7 +29,7 @@
 #include <utility>
 #include <vector>
 
-namespace strata_frontend {
+namespace aegis {
 
 struct Literals {
     // the literal texts, longest first (as the tokenizer matches them: a literal inside a longer one must not be
@@ -239,4 +239,4 @@ struct Literals {
     }
 };
 
-} // namespace strata_frontend
+} // namespace aegis

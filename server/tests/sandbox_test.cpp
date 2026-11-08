@@ -1,6 +1,6 @@
-// aegis-strata: the engine child's containment (frontend/strata_sandbox.cpp). No GPU, no model, no llama.cpp.
+// aegis-strata: the engine child's containment (server/strata_sandbox.cpp). No GPU, no model, no llama.cpp.
 //
-//   c++ -std=c++20 -I frontend frontend/tests/sandbox_test.cpp frontend/strata_sandbox.cpp -o sandbox_test
+//   c++ -std=c++20 -I server server/tests/sandbox_test.cpp server/strata_sandbox.cpp -o sandbox_test
 //   ./sandbox_test
 //
 // The test is the harness and the probe. With no arguments it is the parent: it builds a plan, forks, applies the
@@ -21,7 +21,7 @@
 //
 // Breaks 2, 4 and 5 were applied on the reference machine on 2026-11-08 and each produced exactly its
 // named failure and nothing else -- that is what establishes the halves are independent rather than
-// one coarse pass/fail. Breaks 1 and 3 need the front end wired in; 6 is covered at unit level by
+// one coarse pass/fail. Breaks 1 and 3 need the server wired in; 6 is covered at unit level by
 // case 12; 7 needs a kernel without Landlock and is reviewed, not tested.
 //
 //   1  whole thing       pass --no-sandbox          -> all four e2e containment checks fail; case 13
@@ -48,7 +48,7 @@
 //                                                     forked. Catches the worst class here -- a policy
 //                                                     that could not be installed being downgraded to
 //                                                     a warning.
-//   7  no Landlock       a kernel without it        -> sandbox_available() false and the front end
+//   7  no Landlock       a kernel without it        -> sandbox_available() false and the server
 //                                                     refuses to start without --no-sandbox. Not
 //                                                     reachable on the reference machine, which has
 //                                                     CONFIG_SECURITY_LANDLOCK=y; listed so it is not
@@ -84,9 +84,9 @@
 #include <sys/ptrace.h>
 #endif
 
-using strata_frontend::SandboxConfig;
-using strata_frontend::SandboxPlan;
-using strata_frontend::SandboxStage;
+using aegis::SandboxConfig;
+using aegis::SandboxPlan;
+using aegis::SandboxStage;
 
 static int failures = 0;
 static int checks   = 0;   // every assertion, counted, so the final line reports something a bug can move
@@ -210,7 +210,7 @@ struct Outcome {
     std::string fail;                 // the fatal record, if any
 };
 
-// fork, apply the sandbox exactly as frontend/engine.hpp's Engine::start will, exec ourselves as the probe.
+// fork, apply the sandbox exactly as server/engine.hpp's Engine::start will, exec ourselves as the probe.
 Outcome run_probe(const SandboxPlan & plan, const std::string & self, const std::string & canary,
                   const std::string & allowed, const char * what) {
     Outcome o;
@@ -228,7 +228,7 @@ Outcome run_probe(const SandboxPlan & plan, const std::string & self, const std:
         ::dup2(out_pipe[1], STDOUT_FILENO);
         ::close(out_pipe[0]);
         ::close(out_pipe[1]);
-        if (strata_frontend::sandbox_apply(plan, err_pipe[1]) != 0) {
+        if (aegis::sandbox_apply(plan, err_pipe[1]) != 0) {
             ::_exit(126);
         }
         const char * argv[] = {self.c_str(), "--probe", canary.c_str(), allowed.c_str(), what, nullptr};
@@ -241,8 +241,8 @@ Outcome run_probe(const SandboxPlan & plan, const std::string & self, const std:
     SandboxStage stage = SandboxStage::None;
     int err_no = 0;
     bool fatal = false;
-    while (strata_frontend::sandbox_read_record(err_pipe[0], stage, err_no, fatal)) {
-        const std::string line = std::string(strata_frontend::sandbox_stage_name(stage)) + ": " + std::strerror(err_no);
+    while (aegis::sandbox_read_record(err_pipe[0], stage, err_no, fatal)) {
+        const std::string line = std::string(aegis::sandbox_stage_name(stage)) + ": " + std::strerror(err_no);
         if (fatal) {
             o.fail = line;
         } else {
@@ -289,7 +289,7 @@ int main(int argc, char ** argv) {
     // below on purpose: building the program needs no kernel, so a document's filter size stays
     // checkable on a machine where the sandbox itself cannot be installed.
     if (argc > 1 && std::strcmp(argv[1], "--facts") == 0) {
-        const strata_frontend::SandboxFilterFacts f = strata_frontend::sandbox_filter_facts();
+        const aegis::SandboxFilterFacts f = aegis::sandbox_filter_facts();
         std::printf("filter_instructions=%zu\nkilled=%zu\n", f.instructions, f.killed);
         return 0;
     }
@@ -304,7 +304,7 @@ int main(int argc, char ** argv) {
 
     // 11: the probe the fail-closed path depends on
     std::string why;
-    const bool available = strata_frontend::sandbox_available(why);
+    const bool available = aegis::sandbox_available(why);
     if (!available) {
         std::printf("sandbox_test: skipped, this kernel cannot enforce it: %s\n", why.c_str());
         return 77;   // a skip, not a pass: the kernel, not the code, is what is missing
@@ -330,8 +330,8 @@ int main(int argc, char ** argv) {
     // deliberately left out. /tmp is in the default read set for the GENI rows file, so the canary must not sit
     // directly in /tmp - it sits in a mkdtemp directory, whose own entry is never added.
     std::vector<std::string> notes;
-    SandboxConfig cfg = strata_frontend::sandbox_default_config(self, model_file, {}, {}, {}, notes);
-    // /tmp read would reach the canary through the hierarchy, so the test removes it: the real front end keeps it
+    SandboxConfig cfg = aegis::sandbox_default_config(self, model_file, {}, {}, {}, notes);
+    // /tmp read would reach the canary through the hierarchy, so the test removes it: the real server keeps it
     // for pictures, which is why e2e.sh puts its canary outside /tmp.
     for (auto it = cfg.read.begin(); it != cfg.read.end();) {
         it = (*it == "/tmp") ? cfg.read.erase(it) : it + 1;
@@ -340,12 +340,12 @@ int main(int argc, char ** argv) {
 
     SandboxPlan plan;
     std::string err;
-    CHECK(strata_frontend::sandbox_plan(cfg, plan, err));
+    CHECK(aegis::sandbox_plan(cfg, plan, err));
     if (!err.empty()) {
         std::fprintf(stderr, "plan: %s\n", err.c_str());
     }
     // true: this test's probe child does get a netns on this kernel; case 13 covers the off case.
-    std::printf("sandbox: %s\n", strata_frontend::sandbox_describe(plan, true).c_str());
+    std::printf("sandbox: %s\n", aegis::sandbox_describe(plan, true).c_str());
 
     // 1-8 and 14
     Outcome o = run_probe(plan, self, canary, model_file, "all");
@@ -396,8 +396,8 @@ int main(int argc, char ** argv) {
 
     // sandbox_describe must report the OUTCOME, not the request: with no network namespace it has to say so,
     // because that is the state in which only the syscall denylist denies egress.
-    const std::string with_ns = strata_frontend::sandbox_describe(plan, true);
-    const std::string no_ns   = strata_frontend::sandbox_describe(plan, false);
+    const std::string with_ns = aegis::sandbox_describe(plan, true);
+    const std::string no_ns   = aegis::sandbox_describe(plan, false);
     std::printf("describe(netns=true):  %s\ndescribe(netns=false): %s\n", with_ns.c_str(), no_ns.c_str());
     CHECK(has(with_ns, "network namespace") && !has(with_ns, "NO NETWORK NAMESPACE"));
     CHECK(has(no_ns, "NO NETWORK NAMESPACE"));
@@ -408,7 +408,7 @@ int main(int argc, char ** argv) {
         bad.read.push_back("/nonexistent-path-for-the-sandbox-test");
         SandboxPlan bad_plan;
         std::string bad_err;
-        CHECK(!strata_frontend::sandbox_plan(bad, bad_plan, bad_err));
+        CHECK(!aegis::sandbox_plan(bad, bad_plan, bad_err));
         CHECK(has(bad_err, "/nonexistent-path-for-the-sandbox-test"));
     }
 
@@ -418,7 +418,7 @@ int main(int argc, char ** argv) {
         off.enabled = false;
         SandboxPlan off_plan;
         std::string off_err;
-        CHECK(strata_frontend::sandbox_plan(off, off_plan, off_err));
+        CHECK(aegis::sandbox_plan(off, off_plan, off_err));
         Outcome w = run_probe(off_plan, self, canary, model_file, "all");
         std::printf("probe(off): %s", w.out.c_str());
         // Every probe the enforced run asserts must invert here, or the enforced run proved nothing about the
@@ -451,7 +451,7 @@ int main(int argc, char ** argv) {
         root.read.push_back("/");
         SandboxPlan root_plan;
         std::string root_err;
-        CHECK(!strata_frontend::sandbox_plan(root, root_plan, root_err));
+        CHECK(!aegis::sandbox_plan(root, root_plan, root_err));
         CHECK(has(root_err, "refusing to grant /"));
         std::printf("refuse-root: %s\n", root_err.empty() ? "(none)" : "refused");
 
@@ -461,7 +461,7 @@ int main(int argc, char ** argv) {
             h.read.push_back(home);
             SandboxPlan h_plan;
             std::string h_err;
-            CHECK(!strata_frontend::sandbox_plan(h, h_plan, h_err));
+            CHECK(!aegis::sandbox_plan(h, h_plan, h_err));
             CHECK(has(h_err, "refusing to grant"));
             std::printf("refuse-home: %s\n", h_err.empty() ? "(none)" : "refused");
         }
@@ -494,7 +494,7 @@ int main(int argc, char ** argv) {
         both.write.push_back(model_dir);
         SandboxPlan both_plan;
         std::string both_err;
-        CHECK(strata_frontend::sandbox_plan(both, both_plan, both_err));
+        CHECK(aegis::sandbox_plan(both, both_plan, both_err));
         // Asserted on the audit line, not on a raw rights bit: that line is what an operator actually reads,
         // and a hand-written bit mask is how this check first passed vacuously (1ULL << 3 is READ_DIR, which is
         // set either way, so it proved nothing).

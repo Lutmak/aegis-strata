@@ -1,11 +1,11 @@
 // aegis-strata: containment of the engine child process, installed by the parent between fork and exec.
 //
-// The front end spawns the engine as a child (frontend/engine.hpp) and links none of its code, so the process
-// boundary is real. This file makes it enforced rather than incidental (THREAT_MODEL.md invariant 1): the child gets a
+// The server spawns the engine as a child (server/engine.hpp) and links none of its code, so the process
+// boundary is real. This file makes it enforced rather than incidental (docs/security.md invariant 1): the child gets a
 // network namespace with only `lo` where the kernel allows one, a seccomp filter that refuses `socket()` for every
 // domain but AF_UNIX, and a Landlock ruleset that reduces its filesystem to an allowlist. Nothing here needs a
 // privilege and nothing here links a library: seccomp is a few dozen hand-written BPF instructions and Landlock has no
-// glibc wrapper, so both are raw syscalls (see docs/SANDBOX.md §3 for the libseccomp decision).
+// glibc wrapper, so both are raw syscalls (see docs/sandbox.md §3 for the libseccomp decision).
 //
 // The work is split either side of fork, because almost nothing is safe to call in a forked child of a process
 // that has a heap:
@@ -19,7 +19,7 @@
 // A successful exec closes the pipe, which the parent reads as end of file.
 //
 // Linux only. On any other platform every function below is a stub that reports the sandbox unavailable, so no
-// caller needs a conditional (docs/SANDBOX.md §8).
+// caller needs a conditional (docs/sandbox.md §8).
 #pragma once
 
 #include <cstddef>
@@ -27,7 +27,7 @@
 #include <string>
 #include <vector>
 
-namespace strata_frontend {
+namespace aegis {
 
 // Where in the sequence a failure happened. Travels over the pipe as a number; named by sandbox_stage_name().
 enum class SandboxStage : std::uint16_t {
@@ -144,4 +144,4 @@ bool sandbox_read_record(int err_fd, SandboxStage & stage, int & err_no, bool & 
 
 const char * sandbox_stage_name(SandboxStage stage);
 
-} // namespace strata_frontend
+} // namespace aegis

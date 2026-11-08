@@ -4,14 +4,14 @@
 // part of a request (USTRAT-15: 6 s a screenshot on 16 CPU threads, 18 s on 6; the engine then reuses the prompt's
 // KV prefix in a fraction of a second). Upstream Strata's Python server kept the encoder's output per picture in an
 // LRU of 64 files keyed by the SHA-256 of the picture's bytes (serve/server.py, class Vision). This is that cache
-// for the C++ front end, in memory: mtmd already names every bitmap by the SHA-256 of its bytes, so the key is the
+// for the C++ server, in memory: mtmd already names every bitmap by the SHA-256 of its bytes, so the key is the
 // chunk's id and the rows are the projector's output (n_tok rows of the model's embedding width).
 //
 // Entries are shared pointers: a request keeps the rows it is writing even when the cache lets go of them, so
 // nothing is ever evicted from under a caller (upstream's #1072). Two limits, entries and bytes; the newest entry is
 // always kept, even alone over the byte limit, so a request never fails for cache room.
 //
-// Header-only, free of llama.cpp, so frontend/tests/picture_cache_test.cpp runs it without a model.
+// Header-only, free of llama.cpp, so server/tests/picture_cache_test.cpp runs it without a model.
 #pragma once
 
 #include <cstddef>
@@ -26,7 +26,7 @@
 #include <utility>
 #include <vector>
 
-namespace strata_frontend {
+namespace aegis {
 
 struct PictureRows {
     int32_t n_tok = 0;   // rows
@@ -172,4 +172,4 @@ private:
     std::unordered_map<std::string, Item> items_;
 };
 
-} // namespace strata_frontend
+} // namespace aegis

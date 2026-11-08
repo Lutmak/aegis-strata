@@ -34,8 +34,8 @@
 #include <thread>
 #include <unistd.h>
 
-using strata_frontend::Engine;
-using strata_frontend::EngineLine;
+using aegis::Engine;
+using aegis::EngineLine;
 
 namespace {
 
@@ -43,7 +43,7 @@ namespace {
 constexpr int ENGINE_POLL_MS = 20;
 
 // the engine keeps this many context slots back; a prompt plus max_new may not reach the context. Upstream hit
-// this: every request without max_tokens got a 500 until the front end counted it.
+// this: every request without max_tokens got a 500 until the server counted it.
 constexpr int ENGINE_CONTEXT_RESERVE = 8;
 
 // mirrors server_slot in server-context.cpp, for the one slot the engine is
@@ -197,11 +197,11 @@ struct strata_context_impl {
     int32_t               vision_width = 0;  // the projector's output width, checked against the model's embedding
     int32_t               image_pad_id = -1; // the token whose runs in the ids the engine replaces with picture rows
     bool                  p_mmproj_gpu = false;
-    strata_frontend::PictureCache pictures; // encoded rows per picture (--picture-cache N; 64 pictures, 1 GiB)
+    aegis::PictureCache pictures; // encoded rows per picture (--picture-cache N; 64 pictures, 1 GiB)
 
     // the texts of the vocabulary's control tokens and marker-like added tokens: inside a message they are text
     // (literals.hpp)
-    strata_frontend::Literals literals;
+    aegis::Literals literals;
 
     server_chat_params           chat_params;
     std::map<std::string, bool>  chat_caps;
@@ -219,7 +219,7 @@ struct strata_context_impl {
     // A directory of our own for the GENI picture handover, so the sandbox can grant the engine that and not
     // all of /tmp -- which holds every other program's scratch data, including this machine's agent transcripts.
     std::string              pictures_dir;
-    strata_frontend::SandboxPlan sandbox;              // outlives the fork: the child reads it after fork()
+    aegis::SandboxPlan sandbox;              // outlives the fork: the child reads it after fork()
     bool                     sandbox_enabled = true;   // --no-sandbox: the REQUEST
     SandboxState             sandbox_state = SandboxState::Off;   // the OUTCOME, set after the engine starts
     std::vector<std::string> sandbox_allow_read;       // --sandbox-allow-read
@@ -246,7 +246,7 @@ struct strata_context_impl {
         send_error(task.id, error, type, task.n_tokens());
     }
 
-    // mirrors process_single_task in server-context.cpp, for the task types this front end has
+    // mirrors process_single_task in server-context.cpp, for the task types this server has
     bool process_new_task(server_task && task, bool is_yielding) {
         (void) is_yielding; // never yields: the engine is not driven from this process
         switch (task.type) {
@@ -415,7 +415,7 @@ struct strata_context_impl {
             // GENI <max_new> [key=value ...] image_pad=<id> <file> <ids>: the engine reads strata-vision records from the
             // file and places them at the runs of image_pad (generate.cpp)
             // img_keys= (#2228): the conversation cache matches a picture by its key and grid, not its rows
-            const std::string keys = strata_frontend::PictureCache::hex_list(image_keys);
+            const std::string keys = aegis::PictureCache::hex_list(image_keys);
             if (!keys.empty()) {
                 h += " img_keys=" + keys;
             }
@@ -428,7 +428,7 @@ struct strata_context_impl {
 
     // The projector file and the vision encoder, on the CPU: the GPU is the engine's. Fails when the projector's
     // output width is not the model's embedding width (the wrong mmproj for this model) or the vocabulary has no
-    // <|image_pad|> token (a model family whose picture placeholders this front end does not know yet).
+    // <|image_pad|> token (a model family whose picture placeholders this server does not know yet).
     bool init_vision(const common_params & p, std::string & err) {
         int32_t proj_width = 0;
         {
@@ -544,7 +544,7 @@ struct strata_context_impl {
     // the request's pictures file (slot.images_path, unlinked when the slot is released)
     // The engine is the process this design distrusts, so a token id it sends is untrusted input. Without
     // this bound, `T 2147483647` reaches llama_vocab's id_to_token.at(id), which throws std::out_of_range;
-    // nothing on the queue thread catches it, so a buggy or compromised engine terminates the front end.
+    // nothing on the queue thread catches it, so a buggy or compromised engine terminates the server.
     bool token_in_vocab(int32_t tok) const {
         return tok >= 0 && tok < llama_vocab_n_tokens(vocab);
     }
@@ -591,7 +591,7 @@ struct strata_context_impl {
                 return false;
             }
             ids.insert(ids.end(), (size_t) rows->n_tok, image_pad_id);
-            slot.image_keys.push_back(strata_frontend::PictureCache::engine_key(chunk_id(ch)));
+            slot.image_keys.push_back(aegis::PictureCache::engine_key(chunk_id(ch)));
             i += (size_t) rows->n_tok;
         }
         return true;
@@ -618,14 +618,14 @@ struct strata_context_impl {
     }
 
     // one picture's rows: the cache's copy when the picture was seen before, else encoded now and remembered
-    strata_frontend::PictureCache::Rows picture_rows(const mtmd_input_chunk * ch, int task_id, int index, std::string & err) {
+    aegis::PictureCache::Rows picture_rows(const mtmd_input_chunk * ch, int task_id, int index, std::string & err) {
         const std::string key = chunk_id(ch);
         if (auto hit = pictures.find(key)) {
             SRV_INF("task %d: picture %d: %d rows (%dx%d) from the cache\n", task_id, index, hit->n_tok, hit->nx, hit->ny);
             return hit;
         }
         const auto t0 = std::chrono::steady_clock::now();
-        strata_frontend::PictureRows rows;
+        aegis::PictureRows rows;
         if (!encode_rows(ch, index, rows, err)) {
             return nullptr;
         }
@@ -636,7 +636,7 @@ struct strata_context_impl {
     }
 
     // the projector's output for one chunk
-    bool encode_rows(const mtmd_input_chunk * ch, int index, strata_frontend::PictureRows & rows, std::string & err) {
+    bool encode_rows(const mtmd_input_chunk * ch, int index, aegis::PictureRows & rows, std::string & err) {
         const int32_t n_tok = (int32_t) mtmd_input_chunk_get_n_tokens(ch);
         if (mtmd_encode_chunk(mctx, ch) != 0) {
             err = "the vision encoder failed";
@@ -670,7 +670,7 @@ struct strata_context_impl {
     }
 
     // one strata-vision record: the header, then the rows
-    static bool write_rows(std::FILE * f, const strata_frontend::PictureRows & r) {
+    static bool write_rows(std::FILE * f, const aegis::PictureRows & r) {
         const int32_t hdr[5] = {0x31455653, r.n_tok, r.nx, r.ny, r.width};
         if (std::fwrite(hdr, sizeof hdr, 1, f) != 1) {
             return false;
@@ -697,7 +697,7 @@ struct strata_context_impl {
                     // Fail this request, not the process. The engine is the untrusted side of the boundary this
                     // project exists to draw, and an id outside the vocabulary reaches llama_vocab's
                     // id_to_token.at(id), which throws std::out_of_range -- on the queue thread, where nothing
-                    // catches it, so the front end would terminate on output from the process it distrusts.
+                    // catches it, so the server would terminate on output from the process it distrusts.
                     SRV_ERR("task %d: the engine sent token id %d, outside the vocabulary (0..%d)\n",
                             slot.task->id, (int) line.token, (int) llama_vocab_n_tokens(vocab) - 1);
                     if (!slot.cancelled) {
@@ -1012,11 +1012,11 @@ struct strata_context_impl {
             if (text == nullptr || *text == '\0') continue;
             if (attr & LLAMA_TOKEN_ATTR_CONTROL) {
                 texts.emplace_back(text);
-            } else if ((attr & LLAMA_TOKEN_ATTR_USER_DEFINED) && strata_frontend::Literals::marker_like(text)) {
+            } else if ((attr & LLAMA_TOKEN_ATTR_USER_DEFINED) && aegis::Literals::marker_like(text)) {
                 texts.emplace_back(text);
             }
         }
-        literals = strata_frontend::Literals::from_texts(std::move(texts));
+        literals = aegis::Literals::from_texts(std::move(texts));
         LOG_INF("literals: %zu control-token texts are text inside a message%s\n", literals.tags.size(),
                 literals.think_open.empty() ? "" : " (an assistant message keeps a leading <think> block)");
     }
@@ -1311,7 +1311,7 @@ bool strata_context::start_engine(const common_params & params, const std::strin
         allow_read.push_back(impl->pictures_dir);
     }
 
-    strata_frontend::SandboxConfig cfg;
+    aegis::SandboxConfig cfg;
     cfg.enabled = impl->sandbox_enabled;
     if (cfg.enabled) {
 #if !defined(__linux__)
@@ -1323,20 +1323,20 @@ bool strata_context::start_engine(const common_params & params, const std::strin
         impl->sandbox_state   = SandboxState::Unavailable;   // not the same thing as the operator choosing --no-sandbox
 #else
         std::string why;
-        if (!strata_frontend::sandbox_available(why)) {
+        if (!aegis::sandbox_available(why)) {
             err = "the engine cannot be contained on this system: " + why +
                   ". Pass --no-sandbox to run it uncontained, and read the warning that prints when you do.";
             return false;
         }
         std::vector<std::string> notes;
-        cfg = strata_frontend::sandbox_default_config(engine_exe, params.model.path, engine_args,
+        cfg = aegis::sandbox_default_config(engine_exe, params.model.path, engine_args,
                                                       allow_read, impl->sandbox_allow_write, notes);
         for (const std::string & n : notes) {
             LOG_INF("sandbox: %s\n", n.c_str());
         }
 #endif
     }
-    if (!strata_frontend::sandbox_plan(cfg, impl->sandbox, err)) {
+    if (!aegis::sandbox_plan(cfg, impl->sandbox, err)) {
         return false;
     }
     // Every rule that will actually be installed, resolved. A rule on a directory grants its whole subtree, so
@@ -1354,7 +1354,7 @@ bool strata_context::start_engine(const common_params & params, const std::strin
         impl->sandbox_state = impl->engine.sandbox_netns() ? SandboxState::Enforced : SandboxState::EnforcedNoNetns;
         LOG_INF("sandbox: %s (%s)\n",
                 impl->sandbox_state == SandboxState::Enforced ? "enforced" : "ENFORCED WITHOUT A NETWORK NAMESPACE",
-                strata_frontend::sandbox_describe(impl->sandbox, impl->engine.sandbox_netns()).c_str());
+                aegis::sandbox_describe(impl->sandbox, impl->engine.sandbox_netns()).c_str());
     }
     return true;
 }

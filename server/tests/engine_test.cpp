@@ -1,6 +1,6 @@
-// aegis-strata: the engine adapter against the fake engine (frontend/tests/fake-engine.py). No GPU, no model.
+// aegis-strata: the engine adapter against the fake engine (server/tests/fake-engine.py). No GPU, no model.
 //
-//   c++ -std=c++20 -I frontend frontend/tests/engine_test.cpp -o engine_test && ./engine_test frontend/tests/fake-engine.py
+//   c++ -std=c++20 -I server server/tests/engine_test.cpp -o engine_test && ./engine_test server/tests/fake-engine.py
 //
 // Cases, each the shape of a bug UnbiasedStrata 1 met:
 //   1. READY parsed: context and the stop capability
@@ -17,8 +17,8 @@
 #include <string>
 #include <vector>
 
-using strata_frontend::Engine;
-using strata_frontend::EngineLine;
+using aegis::Engine;
+using aegis::EngineLine;
 
 static int failures = 0;
 #define CHECK(cond) do { if (!(cond)) { std::fprintf(stderr, "FAIL %s:%d: %s\n", __FILE__, __LINE__, #cond); ++failures; } } while (0)

@@ -108,7 +108,7 @@ endif()
 target_link_libraries(strata_hip_runtime INTERFACE hip::host)
 # The shim renames the CUDA runtime to HIP, force-included into every host and device source. On Windows the host
 # compiler is ROCm's clang++ too (CMake refuses to mix cl.exe with Clang HIP), which takes
-# -include like it does on Linux; an MSVC-style front end (cl / clang-cl) takes /FI instead. Forward slashes, so /FI
+# -include like it does on Linux; an MSVC-style server (cl / clang-cl) takes /FI instead. Forward slashes, so /FI
 # does not read the path's backslashes as escapes.
 file(TO_CMAKE_PATH "${STRATA_HIP_COMPAT_INCLUDE_DIR}/cuda_runtime.h" _strata_hip_force)
 if(MSVC)
@@ -123,7 +123,6 @@ target_compile_options(strata_hip_runtime INTERFACE
 # CMake does not infer HIP from Strata's existing CUDA-shaped .cu suffixes.
 file(GLOB_RECURSE _strata_hip_sources CONFIGURE_DEPENDS
   "${CMAKE_CURRENT_SOURCE_DIR}/src/*.cu"
-  "${CMAKE_CURRENT_SOURCE_DIR}/bench/*.cu"
   "${CMAKE_CURRENT_SOURCE_DIR}/tests/*.cu")
 if(_strata_hip_sources)
   set_source_files_properties(${_strata_hip_sources} PROPERTIES LANGUAGE HIP)

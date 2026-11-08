@@ -1,5 +1,5 @@
 // aegis-strata: containment of the engine child process. See strata_sandbox.h for the split either side of fork
-// and docs/SANDBOX.md for why the policy is shaped this way.
+// and docs/sandbox.md for why the policy is shaped this way.
 #include "strata_sandbox.h"
 
 #include <cerrno>
@@ -10,7 +10,7 @@
 #include <poll.h>
 #include <unistd.h>
 
-namespace strata_frontend {
+namespace aegis {
 
 namespace {
 
@@ -70,7 +70,7 @@ bool sandbox_read_record(int err_fd, SandboxStage & stage, int & err_no, bool & 
     return true;
 }
 
-} // namespace strata_frontend
+} // namespace aegis
 
 // ---- Linux ---------------------------------------------------------------------------------------------------------
 #if defined(__linux__)
@@ -90,7 +90,7 @@ bool sandbox_read_record(int err_fd, SandboxStage & stage, int & err_no, bool & 
 
 #include <cstdlib>
 
-namespace strata_frontend {
+namespace aegis {
 
 namespace {
 
@@ -231,7 +231,7 @@ bool seccomp_action_available(std::uint32_t action) {
 
 // ---- the seccomp filter ----------------------------------------------------------------------------------------
 // Syscalls that must not run. Every one of them would undo one of the other two mechanisms; none appears in the
-// import set of the engine or of any of the four CUDA libraries it loads (docs/SANDBOX.md §4).
+// import set of the engine or of any of the four CUDA libraries it loads (docs/sandbox.md §4).
 // The numbers are back-filled rather than #ifdef'd away: a guard that drops an entry on a host with older
 // kernel headers would shrink the denylist silently. x86-64 syscall numbers are ABI-stable, so hard-coding is safe.
 #ifndef __NR_fsopen
@@ -294,15 +294,15 @@ const int kKilled[] = {
 };
 
 // A silently shorter kill list is a silently weaker sandbox, so its length is a build-time fact. Changing it
-// means changing this number, docs/SANDBOX.md's table, and the filter length the test asserts -- deliberately.
+// means changing this number, docs/sandbox.md's table, and the filter length the test asserts -- deliberately.
 constexpr std::size_t kKilledCount = sizeof kKilled / sizeof kKilled[0];
-static_assert(kKilledCount == 29, "the kill list changed size: update this count, the table in docs/SANDBOX.md, and sandbox_test's expected filter length");
+static_assert(kKilledCount == 29, "the kill list changed size: update this count, the table in docs/sandbox.md, and sandbox_test's expected filter length");
 
 constexpr int kAfUnix = 1;   // AF_UNIX: CUDA's local IPC. Every other domain, present or future, is refused.
 
 // `kDenyAction` and `kKillAction` are the two constants to change to SECCOMP_RET_LOG when deriving the list
 // against the real engine on a GPU: the filter then refuses nothing and dmesg names every call it would have
-// refused. docs/SANDBOX.md §4 "How the list was derived" has the procedure.
+// refused. docs/sandbox.md §4 "How the list was derived" has the procedure.
 constexpr std::uint32_t kDenyAction = SECCOMP_RET_ERRNO | (EAFNOSUPPORT & SECCOMP_RET_DATA);
 
 void build_filter(std::vector<SandboxFilterInsn> & out, std::uint32_t kill_action) {
@@ -315,7 +315,7 @@ void build_filter(std::vector<SandboxFilterInsn> & out, std::uint32_t kill_actio
     // The filter is inherited across fork and kept across exec, and it is written so that every syscall other than
     // socket/socketpair is decided on its number alone. That is what lets the kernel's seccomp bitmap cache answer
     // for the hot calls (pread64, mmap, ioctl, futex) without running a single instruction - which is why
-    // --ple-io direct at ~100,000 reads/s is unaffected (docs/SANDBOX.md §6).
+    // --ple-io direct at ~100,000 reads/s is unaffected (docs/sandbox.md §6).
 
     // Refuse anything that is not the x86-64 ABI: a filter written for one syscall table means nothing against
     // another, and i386/x32 reach the kernel through different numbers.
@@ -430,13 +430,13 @@ std::string path_lookup(const std::string & prog) {
     return {};
 }
 
-// A script engine (frontend/tests/fake-engine.py) is exec'd through its interpreter, which must therefore be
+// A script engine (server/tests/fake-engine.py) is exec'd through its interpreter, which must therefore be
 // executable under the ruleset. Reading the shebang avoids granting all of /usr/bin.
 //
 // `#!/usr/bin/env python3` needs TWO entries, not one: Landlock governs every execve, so allowing `env` is not
 // enough -- env then exec's `python3`, which the ruleset refuses with EACCES and the engine dies with
 // "env: 'python3': Permission denied". So when the interpreter is env, its first argument is resolved against
-// PATH and returned as well. Found by running frontend/tests/e2e.sh against the real ruleset.
+// PATH and returned as well. Found by running server/tests/e2e.sh against the real ruleset.
 // `unresolved` receives env's program name when it was found in the shebang but could not be resolved, so the
 // caller can say so instead of letting the engine die at exec with nothing in the log.
 std::vector<std::string> shebang_executables(const std::string & exe, std::string & unresolved) {
@@ -586,11 +586,11 @@ SandboxConfig sandbox_default_config(const std::string & engine_exe,
         add_if_exists(cfg.read, p);
     }
 
-    // The picture rows the front end encodes and hands over on the GENI line live in a mkstemp file under /tmp
-    // (frontend/strata_context.cpp). Read-only: the child only consumes them.
+    // The picture rows the server encodes and hands over on the GENI line live in a mkstemp file under /tmp
+    // (server/strata_context.cpp). Read-only: the child only consumes them.
     // NOT /tmp. A Landlock rule on a directory grants its whole subtree, and /tmp holds other programs'
     // scratch data -- on this box the coding agent's own session transcripts. The engine needs exactly one
-    // thing there: the picture rows the front end hands it on the GENI line. The front end therefore makes a
+    // thing there: the picture rows the server hands it on the GENI line. The server therefore makes a
     // directory of its own for those and passes it in `extra_read`, so the grant is that directory alone.
 
     // The engine itself, its directory, and - when it is a script - its interpreter.
@@ -613,7 +613,7 @@ SandboxConfig sandbox_default_config(const std::string & engine_exe,
         }
     }
 
-    // The vocabulary GGUF's directory, and every engine argument that names a path that exists. The front end does
+    // The vocabulary GGUF's directory, and every engine argument that names a path that exists. The server does
     // not know what the engine's options mean, so the policy is derived from the invocation and logged line by
     // line instead of hardcoded. A path-looking argument that does not exist is named in the notes rather than
     // allowed, so that when the engine later fails to write there the reason is already in the log.
@@ -969,12 +969,12 @@ int sandbox_apply(const SandboxPlan & plan, int err_fd) noexcept {
 #undef SANDBOX_FAIL
 }
 
-} // namespace strata_frontend
+} // namespace aegis
 
 // ---- every other platform ------------------------------------------------------------------------------------
 #else
 
-namespace strata_frontend {
+namespace aegis {
 
 bool sandbox_available(std::string & why) {
     why = "not available on this platform: seccomp-bpf and Landlock are Linux interfaces";
@@ -1005,6 +1005,6 @@ int sandbox_apply(const SandboxPlan &, int) noexcept {
     return 0;
 }
 
-} // namespace strata_frontend
+} // namespace aegis
 
 #endif

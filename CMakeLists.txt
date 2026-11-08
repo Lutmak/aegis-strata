@@ -111,12 +111,10 @@ endif()
 if(STRATA_ENABLE_HIP)
   include(cmake/hip_backend.cmake)
 endif()
-# The test suite and the micro benchmarks live in tests/ and bench/micro/, which the published source leaves out.
-set(_strata_tests_default OFF)
-if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/tests/CMakeLists.txt AND EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/bench/micro)
-  set(_strata_tests_default ON)
-endif()
-option(STRATA_BUILD_TESTS "Build the test suite" ${_strata_tests_default})
+# Off by default: `make build` ships three binaries and nothing else. `make test-engine` turns this on,
+# builds the test programs and runs ctest -- without it ctest registers tests whose executables were never
+# built and reports "Unable to find executable" for every one of them.
+option(STRATA_BUILD_TESTS "Build the engine test suite (see `make test-engine`)" OFF)
 option(STRATA_BUILD_CONVERSATION_TESTS "Build standalone conversation cache tests" OFF)
 option(STRATA_WERROR "Treat compiler warnings as errors" OFF)
 # #2027: defined here, before the GPU section reads it to register the native-expert tests (it was defined at the
@@ -321,7 +319,7 @@ target_link_libraries(strata-plan PRIVATE strata_plan)
 # ---- strata_core (GPU runtime) ---------------------------------------------
 # Only built when a GPU backend is on, so the Phase 1 targets keep working without a toolkit.
 if(STRATA_ENABLE_CUDA OR STRATA_ENABLE_HIP)
-  add_library(strata_core STATIC src/core/device.cu src/core/pinned.cu src/platform/memory.cpp src/core/graph.cpp src/core/weights.cpp
+  add_library(strata_core STATIC src/core/device.cu src/core/pinned.cu src/platform/memory.cpp src/core/weights.cpp
                                src/core/layout.cpp)
   target_include_directories(strata_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
   if(STRATA_ENABLE_CUDA AND STRATA_EXPERIMENTAL_SM60)
@@ -525,31 +523,6 @@ if(STRATA_ENABLE_CUDA OR STRATA_ENABLE_HIP)
     # FMA changes tie results. The embedding gather also relies on separately rounded operations.
     set_source_files_properties(src/kernels/cuda/elementwise.cu src/kernels/cuda/quantize_act.cu
       PROPERTIES COMPILE_OPTIONS "-ffp-contract=off")
-  endif()
-
-  set(STRATA_ORACLE_SOURCE_DIR "" CACHE PATH "Pinned llama.cpp source for independent CUDA parity tests")
-  set(STRATA_ORACLE_BUILD_DIR "" CACHE PATH "Matching existing shared llama.cpp build")
-  # This oracle is a CUDA ggml build; do not pull CUDA libraries into a HIP build.
-  if(STRATA_ENABLE_CUDA AND STRATA_ORACLE_SOURCE_DIR AND STRATA_ORACLE_BUILD_DIR)
-    foreach(parity IN ITEMS native_mmvq native_bf16 native_shared native_gr_norm native_moe native_gdn native_gr_postops native_router native_gdn_preprocess native_gdn_pipeline native_qsa native_rope native_ple_postops native_flash_attn native_qsa_indexer native_qsa_score)
-    add_executable(${parity}_parity bench/micro/${parity}_parity.cpp)
-    target_include_directories(${parity}_parity PRIVATE
-      "${STRATA_ORACLE_SOURCE_DIR}/ggml/include" ${_strata_gpu_include_directories})
-    target_compile_definitions(${parity}_parity PRIVATE GGML_SHARED GGML_BACKEND_SHARED)
-    target_link_libraries(${parity}_parity PRIVATE strata_kernels ${_strata_gpu_runtime_target})
-    foreach(component IN ITEMS ggml ggml-base ggml-cpu ggml-cuda)
-      string(REPLACE "-" "_" variable "STRATA_ORACLE_${component}")
-      find_library(${variable} NAMES ${component} PATHS
-        "${STRATA_ORACLE_BUILD_DIR}/ggml/src" "${STRATA_ORACLE_BUILD_DIR}/ggml/src/${component}"
-        "${STRATA_ORACLE_BUILD_DIR}/bin" NO_DEFAULT_PATH REQUIRED)
-      target_link_libraries(${parity}_parity PRIVATE "${${variable}}")
-    endforeach()
-    add_test(NAME ${parity}_parity COMMAND ${parity}_parity --selftest)
-    if(WIN32)
-      set_tests_properties(${parity}_parity PROPERTIES
-        ENVIRONMENT_MODIFICATION "PATH=path_list_prepend:${STRATA_ORACLE_BUILD_DIR}/bin")
-    endif()
-    endforeach()
   endif()
 
   # ---- strata_engine (P2.S5) -----------------------------------------------------
@@ -1158,8 +1131,11 @@ if(STRATA_ENABLE_CUDA OR STRATA_ENABLE_HIP)
   add_executable(ple_parity src/kernels/ple_parity.cpp)
   target_include_directories(ple_parity PRIVATE ${_strata_gpu_include_directories})
   target_link_libraries(ple_parity PRIVATE strata_kernels ${_strata_gpu_runtime_target})
-  set(STRATA_PLE_FIXTURE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/bench/micro" CACHE PATH
-      "Directory containing required ple_in.bin and ple_out.bin parity fixtures")
+  # Upstream never published ple_in.bin / ple_out.bin, so there is no in-tree default and this test fails
+  # until an operator points it at a pair they captured themselves. A failure is the honest result: the
+  # alternative is a test that passes by finding nothing.
+  set(STRATA_PLE_FIXTURE_DIR "" CACHE PATH
+      "Directory holding the ple_in.bin and ple_out.bin parity fixtures (not shipped)")
   add_test(NAME ple_parity COMMAND ple_parity --selftest
     --in "${STRATA_PLE_FIXTURE_DIR}/ple_in.bin" --out "${STRATA_PLE_FIXTURE_DIR}/ple_out.bin"
     WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
@@ -1216,14 +1192,6 @@ if(STRATA_ENABLE_CUDA OR STRATA_ENABLE_HIP)
   target_link_libraries(s2_expert_grouped_parity PRIVATE strata_kernels ${_strata_gpu_runtime_target})
   add_test(NAME s2_expert_grouped_parity COMMAND s2_expert_grouped_parity --selftest)
 
-  # Plan v0.3 P3: native MMVQ for 1..8 tokens (bitwise selftest + --bench timing); synthetic data, no model.
-  if(STRATA_BUILD_TESTS AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/bench/micro/native_mmvq_multi.cpp")
-    add_executable(native_mmvq_multi bench/micro/native_mmvq_multi.cpp)
-    target_include_directories(native_mmvq_multi PRIVATE ${_strata_gpu_include_directories})
-    target_link_libraries(native_mmvq_multi PRIVATE strata_kernels ${_strata_gpu_runtime_target})
-    add_test(NAME native_mmvq_multi COMMAND native_mmvq_multi --selftest)
-  endif()
-
   # Plan v0.3 P0.1: working-set lock of a host region (CPU only).
   add_executable(platform_memory_test src/platform/memory_test.cpp)
   target_link_libraries(platform_memory_test PRIVATE strata_core ${_strata_gpu_runtime_target})
@@ -1250,30 +1218,7 @@ if(STRATA_ENABLE_CUDA OR STRATA_ENABLE_HIP)
     add_test(NAME hip_device_selftest COMMAND strata-device --selftest)
   endif()
 
-  # ---- P2.S5: the GraphRegistry --------------------------------------------------
-  # A .cu because the test needs real kernels to capture; it links `strata_core` and not `strata_kernels`,
-  # because what it exercises is the capture machinery and not any kernel in it.
-  if(STRATA_BUILD_TESTS AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/bench/micro/graph_registry_test.cu")
-    add_executable(graph_registry_test bench/micro/graph_registry_test.cu)
-    target_include_directories(graph_registry_test PRIVATE ${_strata_gpu_include_directories})
-    target_link_libraries(graph_registry_test PRIVATE strata_core ${_strata_gpu_runtime_target})
-    add_test(NAME graph_registry_test COMMAND graph_registry_test)
-  endif()
-
-  # ---- P2.S5's GATE: is a device<->pinned-memory handoff graph-capturable? --------------------
-  # The doorbell protocol puts the D2H of `x_f` and the miss list INSIDE G[l] - that is the whole overlap.  The
-  # phase doc says to verify this "before building on it", and this project has already lost two rounds to
-  # building first (a memory-only spin that DEADLOCKS on Windows, and a `cudaEventRecord` inside a capture that
-  # is SILENTLY DROPPED).  It links only cudart: it is about the capture machinery, not about any kernel.
-  if(STRATA_ENABLE_CUDA AND STRATA_BUILD_TESTS AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/bench/micro/pinned_capture.cu")
-    add_executable(pinned_capture bench/micro/pinned_capture.cu)
-    target_include_directories(pinned_capture PRIVATE ${_strata_gpu_include_directories})
-    target_link_libraries(pinned_capture PRIVATE ${_strata_gpu_runtime_target})
-    add_test(NAME pinned_capture COMMAND pinned_capture)
-  endif()
-
-  # Tells tests/CMakeLists.txt to add the CUDA-dependent Catch2 target.  It cannot be declared there
-  # unconditionally: tests/ is added at the end of this file, but the flag has to be known before it runs.
+  # The CUDA-dependent Catch2 flag has to be known before tests/ is processed at the end of this file.
   if(STRATA_ENABLE_CUDA)
     set(STRATA_CUDA_TESTS ON)
   endif()
@@ -1448,23 +1393,20 @@ if(STRATA_NATIVE_EXPERTS)
     message(FATAL_ERROR "ggml was not found in ${STRATA_GGML_DIR}: run `git submodule update --init` first")
   endif()
   # UnbiasedStrata: the submodule is the fork robertkarl/llama.cpp, branch UnbiasedStrata (upstream's pin plus the
-  # tool-call parser commits PROVENANCE.md lists). Nothing is patched at configure; the submodule's tree is what is built.
+  # tool-call parser commits the README names). Nothing is patched at configure; the submodule's tree is what is built.
   add_subdirectory(${STRATA_GGML_DIR}/ggml ${CMAKE_BINARY_DIR}/ggml EXCLUDE_FROM_ALL)
   # part of strata_kernels_cpu (the pool calls these and they call its CPU probe: one library, so GNU ld's
   # one-pass static linking has no cycle to resolve)
   target_sources(strata_kernels_cpu PRIVATE src/kernels/cpu/native_expert.cpp src/kernels/cpu/iq_avx512.cpp
                                            src/kernels/cpu/iq_avx2.cpp src/kernels/cpu/kq_avx2.cpp
                                            src/kernels/cpu/kq_avx1.cpp src/kernels/cpu/q2_avx1.cpp src/kernels/cpu/iq_avx1.cpp
-                                           src/kernels/cpu/nvfp4_avx512.cpp src/kernels/cpu/nvfp4_avx2.cpp
-                                           src/kernels/cpu/tq_cpu.cpp src/kernels/cpu/tq_avx2.cpp src/kernels/cpu/tq_avx512.cpp)
+                                           src/kernels/cpu/nvfp4_avx512.cpp src/kernels/cpu/nvfp4_avx2.cpp)
   target_include_directories(strata_kernels_cpu PRIVATE third_party/ggml)
   if(MSVC)
     set_source_files_properties(src/kernels/cpu/iq_avx512.cpp src/kernels/cpu/nvfp4_avx512.cpp
                                 PROPERTIES COMPILE_OPTIONS "/arch:AVX512")
     set_source_files_properties(src/kernels/cpu/iq_avx2.cpp PROPERTIES COMPILE_OPTIONS "/arch:AVX2")
     set_source_files_properties(src/kernels/cpu/kq_avx2.cpp PROPERTIES COMPILE_OPTIONS "/arch:AVX2")
-    set_source_files_properties(src/kernels/cpu/tq_avx2.cpp PROPERTIES COMPILE_OPTIONS "/arch:AVX2")
-    set_source_files_properties(src/kernels/cpu/tq_avx512.cpp PROPERTIES COMPILE_OPTIONS "/arch:AVX512")
     set_source_files_properties(src/kernels/cpu/nvfp4_avx2.cpp PROPERTIES COMPILE_OPTIONS "/arch:AVX2")
     # the router lookahead's AVX1 dot (older CPUs; called behind cpu_avx1_ok): no FMA, no 256-bit integer ops
     set_source_files_properties(src/kernels/cpu/kq_avx1.cpp PROPERTIES COMPILE_OPTIONS "/arch:AVX")
@@ -1477,10 +1419,6 @@ if(STRATA_NATIVE_EXPERTS)
     set_source_files_properties(src/kernels/cpu/iq_avx512.cpp src/kernels/cpu/nvfp4_avx512.cpp PROPERTIES COMPILE_OPTIONS
                                 "-mavx512f;-mavx512bw;-mavx512vl;-mavx512dq;-mavx512vnni;-mavx512vbmi;-mavx512vpopcntdq;-mbmi2;-mf16c;-mfma")
     set_source_files_properties(src/kernels/cpu/iq_avx2.cpp PROPERTIES COMPILE_OPTIONS "-mavx2;-mfma;-mf16c")
-    # the trellis experts' CPU lane (tq_cpu.hpp; the DeepSeek-V4.1 engine's ds4_tq_cpu.cpp), upstream v0.2.4's flags
-    set_source_files_properties(src/kernels/cpu/tq_avx2.cpp PROPERTIES COMPILE_OPTIONS "-mavx2;-mfma;-mf16c")
-    set_source_files_properties(src/kernels/cpu/tq_avx512.cpp PROPERTIES COMPILE_OPTIONS
-                                "-mavx512f;-mavx512bw;-mavx512vl;-mavx512dq;-mavx512vnni;-mavx512vbmi;-mavx512vpopcntdq;-mbmi2;-mf16c;-mfma")
     set_source_files_properties(src/kernels/cpu/kq_avx2.cpp PROPERTIES COMPILE_OPTIONS "-mavx2;-mfma;-mf16c")
     set_source_files_properties(src/kernels/cpu/nvfp4_avx2.cpp PROPERTIES COMPILE_OPTIONS "-mavx2;-mfma;-mf16c")
     set_source_files_properties(src/kernels/cpu/kq_avx1.cpp PROPERTIES COMPILE_OPTIONS "-mavx")
@@ -1862,11 +1800,6 @@ if(STRATA_NATIVE_EXPERTS)
   endif()
 endif()
 
-if(STRATA_ENABLE_CUDA AND STRATA_BUILD_TESTS AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/bench/micro/hit_cpu_order_parity.cu")
-  add_executable(hit_cpu_order_parity bench/micro/hit_cpu_order_parity.cu)
-  target_link_libraries(hit_cpu_order_parity PRIVATE strata_kernels strata_kernels_cpu ${_strata_gpu_runtime_target})
-endif()
-
 if(STRATA_BUILD_TESTS)
   if(WIN32)
     add_executable(pool_affinity_test src/kernels/cpu/pool_affinity_test.cpp)
@@ -1962,12 +1895,12 @@ if(STRATA_BUILD_TESTS)
 endif()
 
 
-# ---- UnbiasedStrata: llama.cpp's libraries for the C++ front end (frontend/) ------------------------------------
-# The front end takes its tokenizer (llama), its Jinja chat templates, chat-format parsers and HTTP library (common,
+# ---- UnbiasedStrata: llama.cpp's libraries for the C++ server (server/) ------------------------------------
+# The server takes its tokenizer (llama), its Jinja chat templates, chat-format parsers and HTTP library (common,
 # cpp-httplib) and its image encoder (mtmd) from the same pinned checkout that ggml comes from.  ggml is configured
 # above, so llama.cpp's build reuses those targets.  Nothing here downloads: LLAMA_USE_PREBUILT_UI is off and
 # LLAMA_CURL is a no-op at this pin.
-option(STRATA_FRONTEND "Build the C++ front end (aegis); needs no CUDA, so it also builds on a laptop" ON)
+option(STRATA_FRONTEND "Build the C++ server (aegis); needs no CUDA, so it also builds on a laptop" ON)
 if(STRATA_FRONTEND AND STRATA_NATIVE_EXPERTS)
   set(LLAMA_BUILD_COMMON ON CACHE BOOL "" FORCE)
   set(LLAMA_BUILD_MTMD ON CACHE BOOL "" FORCE)
@@ -1980,46 +1913,46 @@ if(STRATA_FRONTEND AND STRATA_NATIVE_EXPERTS)
   # The engine-agnostic files of llama.cpp's tools/server, compiled as they are from the submodule: the HTTP layer,
   # the task queue, the task and result types with their OpenAI JSON, request parsing and SSE formatting, the request
   # schema, the resumable-stream pipe. server-context.cpp, the part bound to llama_context, is replaced by
-  # frontend/strata_context.cpp. server-http.cpp wants the web UI's asset table (ui.h, generated by tools/ui at build
-  # time); frontend/ui_stub provides an empty one.
+  # server/strata_context.cpp. server-http.cpp wants the web UI's asset table (ui.h, generated by tools/ui at build
+  # time); server/ui_stub provides an empty one.
   find_package(Threads REQUIRED)
   set(_strata_srv ${STRATA_GGML_DIR}/tools/server)
   add_library(strata_llama_server STATIC
     ${_strata_srv}/server-http.cpp ${_strata_srv}/server-queue.cpp ${_strata_srv}/server-task.cpp
     ${_strata_srv}/server-common.cpp ${_strata_srv}/server-chat.cpp ${_strata_srv}/server-schema.cpp
     ${_strata_srv}/server-stream.cpp
-    frontend/ui_stub/ui.cpp)
+    server/ui_stub/ui.cpp)
   target_include_directories(strata_llama_server PUBLIC ${_strata_srv} ${STRATA_GGML_DIR}/tools/mtmd
-                             ${STRATA_GGML_DIR} ${CMAKE_CURRENT_SOURCE_DIR}/frontend/ui_stub)
+                             ${STRATA_GGML_DIR} ${CMAKE_CURRENT_SOURCE_DIR}/server/ui_stub)
   target_link_libraries(strata_llama_server PUBLIC llama-common llama mtmd cpp-httplib Threads::Threads)
   target_compile_features(strata_llama_server PUBLIC cxx_std_17)
 
-  add_executable(aegis frontend/main.cpp frontend/strata_context.cpp frontend/strata_sandbox.cpp)
-  target_include_directories(aegis PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/frontend)
+  add_executable(aegis server/main.cpp server/strata_context.cpp server/strata_sandbox.cpp)
+  target_include_directories(aegis PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/server)
   target_link_libraries(aegis PRIVATE strata_llama_server)
   target_compile_features(aegis PRIVATE cxx_std_20)
 
-  # The engine adapter against the fake engine (frontend/tests/fake-engine.py): no GPU, no model, no llama.cpp.
-  # `make test` builds and runs it, then frontend/tests/e2e.sh against the binary above.
+  # The engine adapter against the fake engine (server/tests/fake-engine.py): no GPU, no model, no llama.cpp.
+  # `make test` builds and runs it, then server/tests/e2e.sh against the binary above.
   # engine.hpp installs the sandbox between fork and exec, so anything that includes it needs the
   # implementation too.
-  add_executable(engine_test EXCLUDE_FROM_ALL frontend/tests/engine_test.cpp frontend/strata_sandbox.cpp)
-  target_include_directories(engine_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/frontend)
+  add_executable(engine_test EXCLUDE_FROM_ALL server/tests/engine_test.cpp server/strata_sandbox.cpp)
+  target_include_directories(engine_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/server)
   target_compile_features(engine_test PRIVATE cxx_std_20)
-  # The containment of the engine child (frontend/strata_sandbox.cpp): forks, applies the sandbox and re-execs
+  # The containment of the engine child (server/strata_sandbox.cpp): forks, applies the sandbox and re-execs
   # itself as a probe.  No GPU, no model, no llama.cpp, so it runs in CI.  No new link library: the filter is
   # hand-written BPF and Landlock has no glibc wrapper, so both are raw syscalls.
-  add_executable(sandbox_test EXCLUDE_FROM_ALL frontend/tests/sandbox_test.cpp frontend/strata_sandbox.cpp)
-  target_include_directories(sandbox_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/frontend)
+  add_executable(sandbox_test EXCLUDE_FROM_ALL server/tests/sandbox_test.cpp server/strata_sandbox.cpp)
+  target_include_directories(sandbox_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/server)
   target_compile_features(sandbox_test PRIVATE cxx_std_20)
 
-  # The literal marking (frontend/literals.hpp) over llama.cpp's vendored nlohmann json, which has the same interface
+  # The literal marking (server/literals.hpp) over llama.cpp's vendored nlohmann json, which has the same interface
   # as common_json: no model, no llama.cpp library.
-  add_executable(literals_test EXCLUDE_FROM_ALL frontend/tests/literals_test.cpp)
-  target_include_directories(literals_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/frontend ${STRATA_GGML_DIR}/vendor)
+  add_executable(literals_test EXCLUDE_FROM_ALL server/tests/literals_test.cpp)
+  target_include_directories(literals_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/server ${STRATA_GGML_DIR}/vendor)
   target_compile_features(literals_test PRIVATE cxx_std_20)
-  add_executable(picture_cache_test EXCLUDE_FROM_ALL frontend/tests/picture_cache_test.cpp)
-  target_include_directories(picture_cache_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/frontend)
+  add_executable(picture_cache_test EXCLUDE_FROM_ALL server/tests/picture_cache_test.cpp)
+  target_include_directories(picture_cache_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/server)
   target_compile_features(picture_cache_test PRIVATE cxx_std_20)
   find_package(Threads REQUIRED)
   target_link_libraries(picture_cache_test PRIVATE Threads::Threads)
@@ -2035,17 +1968,11 @@ endif()
 
 # ---- HIP gfx906: every CUDA source of the tree (and the ggml-cuda MMQ sources) is compiled as HIP ----
 if(STRATA_HIP_GFX906)
-  file(GLOB_RECURSE _strata_cu CONFIGURE_DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/src/*.cu ${CMAKE_CURRENT_SOURCE_DIR}/bench/micro/*.cu
-       ${CMAKE_CURRENT_SOURCE_DIR}/tools/vision/*.cu)
+  file(GLOB_RECURSE _strata_cu CONFIGURE_DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/src/*.cu)
   if(_strata_mmq)
     file(GLOB _strata_mmq_cu ${_strata_mmq}/*.cu ${_strata_mmq}/template-instances/*.cu)
     list(APPEND _strata_cu ${_strata_mmq_cu})
     target_compile_definitions(strata_mmq PRIVATE GGML_USE_HIP)
   endif()
   set_source_files_properties(${_strata_cu} PROPERTIES LANGUAGE HIP)
-endif()
-
-if(STRATA_HIP_GFX906)
-  add_executable(gfx906_qsa_query_swizzle_probe bench/gfx906_qsa_query_swizzle_probe.cpp)
-  target_link_libraries(gfx906_qsa_query_swizzle_probe PRIVATE strata_kernels ${_strata_gpu_runtime_target})
 endif()

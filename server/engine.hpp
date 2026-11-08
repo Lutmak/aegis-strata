@@ -2,7 +2,7 @@
 //
 // The engine (`strata`) speaks lines over stdin/stdout: `GEN <max_new> key=value... <id,id,...>` in,
 // `T <id>` per token, `PP`, `RESUME`, `DONE ...`, `ERR ...` out, `STOP` to cancel, `QUIT` to end. The protocol is
-// specified by the comments in this file and by frontend/tests/fake-engine.py, which implements it.
+// specified by the comments in this file and by server/tests/fake-engine.py, which implements it.
 // This class owns one such child. It never blocks longer than the caller allows: the server
 // loop polls it between tasks so a cancel from a disconnected client is seen within the poll interval.
 #pragma once
@@ -25,7 +25,7 @@
 
 #include "strata_sandbox.h"
 
-namespace strata_frontend {
+namespace aegis {
 
 // Reap a dead child: kill(pid, 0) would report a zombie as alive. The pid slot is shared with quit() on another
 // thread (the supervisor polls this while a SIGTERM handler shuts down), so it is read once and cleared by
@@ -89,7 +89,7 @@ public:
     // allowlist and a seccomp filter (strata_sandbox.h). A sandbox that cannot be installed is a failure, never a
     // warning, so the child reports it over `sb` and never reaches execv.
     bool start(const std::string & executable, const std::vector<std::string> & args, std::string & err,
-               const strata_frontend::SandboxPlan * sandbox = nullptr) {
+               const aegis::SandboxPlan * sandbox = nullptr) {
         int to_child[2], from_child[2], sb[2] = {-1, -1};
         if (::pipe(to_child) != 0 || ::pipe(from_child) != 0) {
             err = std::string("pipe: ") + std::strerror(errno);
@@ -120,7 +120,7 @@ public:
             ::dup2(to_child[0], STDIN_FILENO);
             ::dup2(from_child[1], STDOUT_FILENO);
             ::close(to_child[0]); ::close(to_child[1]); ::close(from_child[0]); ::close(from_child[1]);
-            if (sandbox != nullptr && strata_frontend::sandbox_apply(*sandbox, sb[1]) != 0) {
+            if (sandbox != nullptr && aegis::sandbox_apply(*sandbox, sb[1]) != 0) {
                 ::_exit(126);   // the record is already on `sb`; the parent turns it into the message
             }
             ::execv(executable.c_str(), argv.data());
@@ -135,13 +135,13 @@ public:
         alive_  = true;
         if (sb[1] >= 0) {
             ::close(sb[1]);
-            strata_frontend::SandboxStage stage{};
+            aegis::SandboxStage stage{};
             int  err_no = 0;
             bool fatal  = false;
             bool        acknowledged = false;
             std::string sandbox_err;
-            while (strata_frontend::sandbox_read_record(sb[0], stage, err_no, fatal)) {
-                if (stage == strata_frontend::SandboxStage::Installed) {
+            while (aegis::sandbox_read_record(sb[0], stage, err_no, fatal)) {
+                if (stage == aegis::SandboxStage::Installed) {
                     // The positive acknowledgement. Its absence is a failure, so that a record lost for any
                     // reason -- or a child killed by its own filter before it could report, which is what an
                     // unexpected architecture does -- can never read as "fully contained".
@@ -150,7 +150,7 @@ public:
                     continue;
                 }
                 const std::string line =
-                    std::string(strata_frontend::sandbox_stage_name(stage)) + ": " + std::strerror(err_no);
+                    std::string(aegis::sandbox_stage_name(stage)) + ": " + std::strerror(err_no);
                 if (fatal) {
                     sandbox_err = "could not contain the engine: " + line;
                 } else {
@@ -481,4 +481,4 @@ private:
     std::map<std::string, std::string> info_;
 };
 
-} // namespace strata_frontend
+} // namespace aegis
