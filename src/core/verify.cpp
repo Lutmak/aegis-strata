@@ -2371,7 +2371,30 @@ bool Verifier::capture(int T, std::string& err) {
     cudaGraphDestroy(graph);
     if (!made) return false;
     const cudaError_t ue = cudaGraphUpload(exec_t, cs_);
-    const cudaError_t us = cudaStreamSynchronize(cs_);
+    const cudaError_t us = ue == cudaSuccess ? cudaStreamSynchronize(cs_) : ue;
+    if (us != cudaSuccess) {
+        // Reporting it is not enough: `exec_t` is the cache slot for this T and the test at the top of this
+        // function is `exec_t != nullptr`, so returning true here would keep a graph that was never uploaded and
+        // claim the window was captured.
+        std::fprintf(stderr, "strata verify: FAILED to capture the %d-token window (upload %s, sync %s)\n", T,
+                     cudaGetErrorString(ue), cudaGetErrorString(us));
+        // The destroy's own result is taken, and the error state cleared with it. The upload already failed, so
+        // the device may be in trouble and this call can fail too -- and it would then be left as the context's
+        // LAST error, to be picked up by the next unrelated cudaGetLastError() and blamed on whatever launched
+        // next. That misattribution is the exact thing checking the upload here exists to stop.
+        const cudaError_t de = cudaGraphExecDestroy(exec_t);
+        if (de != cudaSuccess) {
+            std::fprintf(stderr, "strata verify: and the graph could not be destroyed (%s)\n",
+                         cudaGetErrorString(de));
+        }
+        (void) cudaGetLastError();
+        exec_t = nullptr;
+        err = std::string("verify: graph upload: ") + cudaGetErrorString(us);
+        return false;
+    }
+    // Printed only now that it is true. It used to be printed before this check, so a failed upload read
+    // "captured the 4-token window (upload out of memory, sync out of memory)" -- a sentence asserting success
+    // with its contradiction in parentheses, and a false positive for anyone grepping "captured the".
     std::fprintf(stderr, "strata verify: captured the %d-token window (upload %s, sync %s)\n", T,
                  cudaGetErrorString(ue), cudaGetErrorString(us));
     return true;
@@ -3256,7 +3279,8 @@ bool Verifier::init_slots(const std::vector<SessionState*>& slots, std::string& 
 }
 
 bool Verifier::capture_batch(const int* rows, int S, int hbase, std::string& err) {
-    cudaGraphExec_t& ex = exec_bm_[bkey(rows, S, hbase)];
+    const auto       key = bkey(rows, S, hbase);
+    cudaGraphExec_t& ex  = exec_bm_[key];
     if (ex != nullptr) return true;
     if (cudaStreamBeginCapture(cs_, cudaStreamCaptureModeThreadLocal) != cudaSuccess) {
         err = "verify: begin batch capture failed";
@@ -3276,11 +3300,35 @@ bool Verifier::capture_batch(const int* rows, int S, int hbase, std::string& err
         err = !ok ? rerr : std::string("verify: end batch capture: ") + cudaGetErrorString(ce);
         return false;
     }
-    const bool made = instantiate_evicting(ex, graph, bkey(rows, S, hbase), "verify: batch instantiate: ", err);
+    const bool made = instantiate_evicting(ex, graph, key, "verify: batch instantiate: ", err);
     cudaGraphDestroy(graph);
-    if (!made) return false;
-    cudaGraphUpload(ex, cs_);
-    cudaStreamSynchronize(cs_);
+    if (!made) {
+        exec_bm_.erase(key);   // same reason as the upload failure below: do not leave an empty slot in the budget
+        return false;
+    }
+    // At 11,670 of 12,288 MiB a failed upload used to go unnoticed here and be misattributed to whichever kernel
+    // launched next. `ex` is the cache slot for this window layout and `ex != nullptr` is the "already captured"
+    // test at the top, so a failure has to clear it: left set, the next call would take a graph that was never
+    // uploaded for a ready one and never try again.
+    const cudaError_t ue = cudaGraphUpload(ex, cs_);
+    const cudaError_t us = ue == cudaSuccess ? cudaStreamSynchronize(cs_) : ue;
+    if (us != cudaSuccess) {
+        const cudaError_t de = cudaGraphExecDestroy(ex);
+        err = std::string("verify: batch graph upload: ") + cudaGetErrorString(us);
+        if (de != cudaSuccess) {
+            // Taken and cleared, not ignored: an unread failure here becomes the context's last error and is
+            // blamed on whatever launches next, which is the misattribution this check exists to stop.
+            err += std::string("; the graph could not be destroyed either: ") + cudaGetErrorString(de);
+        }
+        (void) cudaGetLastError();
+        // ERASE the entry, do not merely null it. `ex` is a reference INTO exec_bm_, so setting it to null left the
+        // key present holding nothing -- and stage_batch counts exec_bm_.size() against batch_graph_limit_ while
+        // instantiate_evicting reports it as "kept". Repeated failed uploads would fill the graph budget with
+        // empty slots and evict live graphs to make room for nothing. Erasing also restores the "already
+        // captured" test, so the next call retries properly.
+        exec_bm_.erase(key);
+        return false;
+    }
     std::string list;
     for (int t = 0; t < S; ++t) list += (t ? "," : "") + std::to_string(rows[t]);
     std::fprintf(stderr, "strata verify: captured the batch window over slots %s\n", list.c_str());

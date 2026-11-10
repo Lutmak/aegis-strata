@@ -29,6 +29,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <stdexcept>
 
 namespace strata::kernels {
 namespace {
@@ -506,8 +507,10 @@ constexpr int THREADS = 256;
 void check(const char* who, void* stream) {
     const cudaError_t e = cudaGetLastError();
     if (e != cudaSuccess) {
-        std::fprintf(stderr, "%s launch: %s\n", who, cudaGetErrorString(e));
-        std::exit(1);
+        // Thrown, not exited: a launch that fails is a run-time failure of the device, and killing the process
+        // here ended the request with no answer at all. The engine's request boundary turns this into an ERR
+        // line, which the server reports, and the sibling native_*.cu kernels already reported this way.
+        throw std::runtime_error(std::string(who) + " launch: " + cudaGetErrorString(e));
     }
     // Deliberately NOT synchronising for a non-null stream: this is called once per layer from a captured
     // graph's worth of work, and `finish()`'s null-stream sync in `s_gemv.cu` is the pattern that made a whole
@@ -1079,7 +1082,7 @@ namespace {
 // Plan v0.3 P6: groups built on the device when every expert is resident at `base + id * blob` (the MTP layer):
 // one block of 128 threads, groups in first-appearance order, entries of a group in routing order.
 __global__ void group_resident_kernel(const int32_t* __restrict__ ids, int n, int k_per_tok, const uint8_t* base,
-                                      long long blob, unsigned long long* __restrict__ grp_ptr,
+                                      long long blob, int n_expert, unsigned long long* __restrict__ grp_ptr,
                                       int32_t* __restrict__ grp_start, int32_t* __restrict__ counts,
                                       int32_t* __restrict__ ent_dst, int32_t* __restrict__ ent_tok) {
     __shared__ int e_s[128], first_s[128], size_s[128], gidx_s[128], gstart_s[129];
@@ -1101,9 +1104,15 @@ __global__ void group_resident_kernel(const int32_t* __restrict__ ids, int n, in
         int gi = 0, acc = 0;
         for (int j = 0; j < n; ++j)
             if (first_s[j] == j) {
+                // This id becomes a device ADDRESS, which moe_grouped_s2 then reads a whole blob from, so an id
+                // outside the arena would be a wild read -- and a negative one, widened to size_t, lands nowhere
+                // near it. Held inside [0, n_expert) the same way the hit_select kernels above bound `e` before
+                // indexing res_row. Routing cannot produce an id outside the range, so this changes no answer;
+                // it keeps a corrupted id from becoming an address outside the arena.
+                const int e_j = e_s[j] < 0 ? 0 : (e_s[j] >= n_expert ? n_expert - 1 : e_s[j]);
                 gidx_s[j] = gi;
                 gstart_s[gi] = acc;
-                grp_ptr[gi] = (unsigned long long) (base + (size_t) e_s[j] * (size_t) blob);
+                grp_ptr[gi] = (unsigned long long) (base + (size_t) e_j * (size_t) blob);
                 grp_start[gi] = acc;
                 acc += size_s[j];
                 ++gi;
@@ -1121,12 +1130,24 @@ __global__ void group_resident_kernel(const int32_t* __restrict__ ids, int n, in
 }
 }  // namespace
 
-void moe_group_resident(const int32_t* ids, int n, int k_per_tok, const uint8_t* base, int64_t blob,
+void moe_group_resident(const int32_t* ids, int n, int k_per_tok, const uint8_t* base, int64_t blob, int n_expert,
                         unsigned long long* grp_ptr, int32_t* grp_start, int32_t* counts, int32_t* ent_dst,
                         int32_t* ent_tok, void* stream) {
-    if (n < 1 || n > 128) { std::fprintf(stderr, "moe_group_resident: n must be 1..128\n"); std::exit(1); }
-    group_resident_kernel<<<1, 128, 0, (cudaStream_t) stream>>>(ids, n, k_per_tok, base, (long long) blob, grp_ptr,
-                                                               grp_start, counts, ent_dst, ent_tok);
+    // Thrown, not exited, for the same reason check() below is: std::exit here kills the engine with no `ERR` on
+    // the protocol, so the server sees only EOF and the request in flight ends with no answer at all -- the worst
+    // of the available outcomes, and the one the rest of this file was converted away from. n_expert is reachable
+    // as 0 or 1 from a malformed model: mtp.cpp passes `(int) g.n_expert`, narrowing an int64_t read from the
+    // GGUF's expert_count, so a count of 2^32 arrives here as 0.
+    if (n < 1 || n > 128) {
+        throw std::runtime_error("moe_group_resident: n must be 1..128, got " + std::to_string(n));
+    }
+    // n_expert bounds the ids inside the kernel; without at least one expert there is no arena to clamp into
+    if (n_expert < 1) {
+        throw std::runtime_error("moe_group_resident: n_expert must be >= 1, got " + std::to_string(n_expert) +
+                                 " (a model whose expert_count does not fit an int?)");
+    }
+    group_resident_kernel<<<1, 128, 0, (cudaStream_t) stream>>>(ids, n, k_per_tok, base, (long long) blob, n_expert,
+                                                               grp_ptr, grp_start, counts, ent_dst, ent_tok);
     check("moe_group_resident", stream);
 }
 
@@ -1220,8 +1241,7 @@ void moe_hit_grouped_s2_cpu_order(const uint8_t* blob_base, const int32_t* slot_
     if (gate_up_trace != nullptr &&
         cudaMemcpyAsync(gate_up_trace, gu, (size_t) n_hits * 2 * FF * sizeof(float),
                         cudaMemcpyDeviceToDevice, cs) != cudaSuccess) {
-        std::fprintf(stderr, "cpu_order/gate_up_trace copy failed\n");
-        std::exit(1);
+        throw std::runtime_error("cpu_order/gate_up_trace copy failed");
     }
     cpu_order_swiglu_kernel<<<(unsigned) ((n_hits * FF + THREADS - 1) / THREADS), THREADS, 0, cs>>>(
         gu, (int) n_hits * FF);

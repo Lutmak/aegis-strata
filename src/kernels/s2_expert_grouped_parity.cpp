@@ -441,7 +441,8 @@ void check_all() {
         int32_t* d_counts = dalloc<int32_t>(2);
         int32_t* d_edst = dalloc<int32_t>(n);
         int32_t* d_etok = dalloc<int32_t>(n);
-        k::moe_group_resident(d_ids, n, K, fx.d, (int64_t) BLOB, d_gptr, d_gstart, d_counts, d_edst, d_etok, nullptr);
+        k::moe_group_resident(d_ids, n, K, fx.d, (int64_t) BLOB, fx.nb, d_gptr, d_gstart, d_counts, d_edst, d_etok,
+                              nullptr);
         ck(cudaDeviceSynchronize(), "group_resident");
         const std::vector<int32_t> edst = down(d_edst, n), etok = down(d_etok, n);
         std::vector<Entry> ent(n);   // entry e: dst = routing index, blob = its expert

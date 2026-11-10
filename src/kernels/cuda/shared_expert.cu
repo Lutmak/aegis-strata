@@ -389,8 +389,10 @@ void shared_expert(const uint8_t* x_q8_0, const uint8_t* x_q8k, const uint16_t* 
     if (stream == nullptr) {
         const cudaError_t e = cudaDeviceSynchronize();
         if (e != cudaSuccess) {
-            std::fprintf(stderr, "shared_expert: %s\n", cudaGetErrorString(e));
-            std::exit(1);
+            // Thrown, not exited: this is a run-time failure of the device, not a wrong shape, and the engine's
+            // request boundary turns it into an ERR line so the client gets an answer. The sibling native_*.cu
+            // kernels have always reported launch failures this way.
+            throw std::runtime_error(std::string("shared_expert: ") + cudaGetErrorString(e));
         }
     }
 }
@@ -410,8 +412,7 @@ void moe_combine(const float* parts, const float* weights, const float* shared, 
     if (stream == nullptr) {
         const cudaError_t e = cudaDeviceSynchronize();
         if (e != cudaSuccess) {
-            std::fprintf(stderr, "moe_combine: %s\n", cudaGetErrorString(e));
-            std::exit(1);
+            throw std::runtime_error(std::string("moe_combine: ") + cudaGetErrorString(e));
         }
     }
 }

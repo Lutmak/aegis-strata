@@ -67,7 +67,6 @@
 #include "strata/prefill/moe_mmq.hpp"
 #include "strata/prefill/prefill.hpp"
 #include "strata/prefill/share_rules.hpp"
-#include "strata/prefill/xmx_moe.hpp"
 #include "strata/core/arch_defaults.hpp"
 #include "strata/core/batch_rows.hpp"
 #include "strata/core/conversation_buffer.hpp"
@@ -83,7 +82,6 @@
 #include "strata/core/expert_cache.hpp"
 #include "strata/core/expert_source.hpp"
 #include "strata/core/foresight_swap.hpp"
-#include "strata/core/graph.hpp"
 #include "strata/core/hit_hook.hpp"
 #include "strata/core/layer.hpp"
 #include "strata/core/layout.hpp"
@@ -240,7 +238,7 @@ namespace strata::kernels { void kv_stream_resolve(const KvStreamMap & p0, const
 namespace strata::kernels { void logits_nonfinite_rows(const float * p0, int p1, int p2, uint32_t * p3, void * p4) { strata::metal_engine::missing("strata::kernels::logits_nonfinite_rows"); } }
 namespace strata::kernels { void map_ids(int32_t * p0, const int32_t * p1, int p2, void * p3) { strata::metal_engine::missing("strata::kernels::map_ids"); } }
 namespace strata::kernels { void moe_combine(const float * p0, const float * p1, const float * p2, float * p3, int64_t p4, int64_t p5, void * p6) { strata::metal_engine::missing("strata::kernels::moe_combine"); } }
-namespace strata::kernels { void moe_group_resident(const int32_t * p0, int p1, int p2, const uint8_t * p3, int64_t p4, unsigned long long * p5, int32_t * p6, int32_t * p7, int32_t * p8, int32_t * p9, void * p10) { strata::metal_engine::missing("strata::kernels::moe_group_resident"); } }
+namespace strata::kernels { void moe_group_resident(const int32_t * p0, int p1, int p2, const uint8_t * p3, int64_t p4, int p5, unsigned long long * p6, int32_t * p7, int32_t * p8, int32_t * p9, int32_t * p10, void * p11) { strata::metal_engine::missing("strata::kernels::moe_group_resident"); } }
 namespace strata::kernels { void moe_grouped_s2(const unsigned long long * p0, const int32_t * p1, const int32_t * p2, const int32_t * p3, const int32_t * p4, int64_t p5, int64_t p6, const uint8_t * p7, const float * p8, void * p9, float * p10, void * p11) { strata::metal_engine::missing("strata::kernels::moe_grouped_s2"); } }
 namespace strata::kernels { void moe_hit_add(float * p0, const float * p1, const int32_t * p2, const int32_t * p3, int64_t p4, int64_t p5, void * p6) { strata::metal_engine::missing("strata::kernels::moe_hit_add"); } }
 namespace strata::kernels { void moe_hit_grouped_s2(const uint8_t * p0, const int32_t * p1, const int32_t * p2, int64_t p3, int64_t p4, const uint8_t * p5, void * p6, float * p7, void * p8, const float * p9) { strata::metal_engine::missing("strata::kernels::moe_hit_grouped_s2"); } }

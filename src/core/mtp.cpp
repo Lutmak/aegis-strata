@@ -1123,8 +1123,15 @@ bool MtpDrafter::record_rest(int step_row, cudaStream_t cs, std::string& err) {
             } catch (const std::exception& e) { err = std::string("mtp route-resident: ") + e.what(); return false; }
         }
         g_mp.stamp(9, cs);
-        moe_group_resident(ids_, (int) (T * K), (int) K, experts_, (int64_t) strata::kernels::cpu::BLOB, grp_ptr_,
-                           grp_start_, grp_counts_, hit_dst_, hit_slot_, cs);
+        // Checked before the narrowing, not after. g.n_expert is an int64_t read from the GGUF's expert_count, and
+        // the kernel's clamp bound is this int: a count of 2^32 would arrive as 0 (caught, but only as a fatal
+        // error) and 2^32+1 as 1, which is silent -- every token routed to expert 0 with no complaint at all.
+        if (g.n_expert < 1 || g.n_expert > INT32_MAX) {
+            err = "mtp: the model reports " + std::to_string(g.n_expert) + " experts, which is not a usable count";
+            return false;
+        }
+        moe_group_resident(ids_, (int) (T * K), (int) K, experts_, (int64_t) strata::kernels::cpu::BLOB,
+                           (int) g.n_expert, grp_ptr_, grp_start_, grp_counts_, hit_dst_, hit_slot_, cs);
         quantize_q8_0_scaled(mixed_, hit_xq_, hit_xs_, (int64_t) T * N, cs);
         moe_grouped_s2(grp_ptr_, grp_start_, grp_counts_, hit_dst_, hit_slot_, (int64_t) T * K, (int64_t) T * K, hit_xq_,
                        hit_xs_, hit_scratch_, parts_, cs);
@@ -1242,8 +1249,24 @@ bool finish_capture(cudaStream_t cs, bool ok, cudaGraphExec_t& exec, const char*
     mtp_list_nodes(graph, what);
     cudaGraphDestroy(graph);
     // an explicit upload: the first launch's implicit one blocked behind a device-side spin (verify.cpp)
-    cudaGraphUpload(exec, cs);
-    cudaStreamSynchronize(cs);
+    // Checked, because the callers test `exec` for null to decide whether this graph is already captured: a failed
+    // upload left in place is a graph that is never uploaded and never retried, and the error would instead surface
+    // on whichever kernel launched next.
+    const cudaError_t ue = cudaGraphUpload(exec, cs);
+    const cudaError_t us = ue == cudaSuccess ? cudaStreamSynchronize(cs) : ue;
+    if (us != cudaSuccess) {
+        // The destroy's result is taken and the error state cleared with it: the upload already failed, so this
+        // call can fail too, and an ignored failure is left as the context's LAST error for the next unrelated
+        // cudaGetLastError() to blame on whatever launched next -- the misattribution this check exists to stop.
+        const cudaError_t de = cudaGraphExecDestroy(exec);
+        exec = nullptr;
+        err = std::string("mtp: ") + what + " upload: " + cudaGetErrorString(us);
+        if (de != cudaSuccess) {
+            err += std::string("; the graph could not be destroyed either: ") + cudaGetErrorString(de);
+        }
+        (void) cudaGetLastError();
+        return false;
+    }
     return true;
 }
 }  // namespace
