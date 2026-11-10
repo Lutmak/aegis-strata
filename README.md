@@ -5,7 +5,7 @@ localhost. Point your coding agent at it instead of a cloud provider.
 
 It runs **Qwen3.8-Flash-Next** on a single NVIDIA GPU. The model is far larger than any consumer
 card's memory, so most of it stays in system RAM and only the parts each token needs are streamed to
-the GPU. On a 12 GB card it answers at about 89 tokens a second.
+the GPU. On a 12 GB card it answers at about 98 tokens a second.
 
 You compile it yourself. There is no installer, no download button, no web interface, no account.
 
@@ -130,7 +130,8 @@ elsewhere:
 - **`--ple-io direct`** reads a large lookup table from SSD as it goes. The alternative locks that
   table in RAM, and the engine is already using about 43 GB of 62 GB.
 - **`--kv-grow`** lets the context cache claim GPU memory as the conversation fills it, rather than
-  reserving all of it at load. Peak use is 11,670 MiB of 12,288 — there is nothing spare.
+  reserving all of it at load. A 256-token answer peaks at 11,610 MiB of 12,288, and a long conversation
+  that fills the context has reached 11,670 — close enough to the limit that there is nothing spare.
 - **`--gpu 0`** stated explicitly, in case a second GPU is driving your display.
 
 ## The engine is offline. Your agent is not.
@@ -146,8 +147,8 @@ behave exactly as they would against a cloud provider.
 
 **What the engine cannot do is reach the network itself.** It has no reason to: it takes a prompt
 and returns tokens. The binary links no network code at all — `nm -D --undefined-only` on the
-engine finds no `connect`, `socket` or `getaddrinfo`, and the same command on the server finds
-seven. The containment is there for the case where something goes wrong inside the engine: a
+engine finds no `connect`, `socket` or `getaddrinfo`, and the same command on the server finds all
+three (fourteen symbols across the whole socket API). The containment is there for the case where something goes wrong inside the engine: a
 malformed GGUF, a bug in a CUDA kernel, a flaw in the pack parser. Code that gets control there
 still cannot open a socket to send your prompts somewhere, and still cannot read `~/.ssh`. That
 turns "it has no network code today" into "it cannot acquire any", which is a different and more
@@ -176,6 +177,27 @@ The containment is on by default and these are the only switches:
 
 `GET /props` reports which of those you actually got, as `sandbox`.
 
+### When the engine stops answering
+
+The engine is a separate process, so it can fail in three ways you can tell apart from outside.
+If it **exits**, the request gets a 503 and the server exits too, with a non-zero status. If it
+**stops answering without exiting** — a hung kernel, a deadlock — then `--engine-timeout` bounds the
+wait: after that many seconds with no output at all from the engine during a request, the request
+gets a 503 and the server ends, again non-zero. The default is 120 seconds, and `0` waits for ever.
+Do not set it below about 15: reading a long prompt is silent, and a maximal 32,768-token prompt is
+about 13 seconds of silence, so a smaller value would cut off healthy requests. It bounds silence,
+not total time, so a slow engine that keeps producing tokens is never cut off. Third, it can
+**fail one request and then exit** — a CUDA kernel that will not launch, say: that request gets a
+500 naming the error, and the server ends non-zero as before. The engine does not try to carry on
+after a kernel failure, because a CUDA error of the sticky kind poisons the context and every later
+launch would fail too.
+
+All three end the process rather than carrying on, because the engine takes one request at a time
+and the server does not start a replacement one, so the next request would fail the same way. Run it
+under a unit with `Restart=on-failure` and the pair comes back. Being **asked** to stop is different:
+`SIGTERM` and `SIGINT` exit 0, including while a request is generating, so `systemctl stop` does not
+look like a failure and does not trip that restart.
+
 ## What it will not do
 
 - Download or run a binary it did not compile. The single exception is your toolchain: the compiler
@@ -194,9 +216,10 @@ The containment is on by default and these are the only switches:
 - **Any model but Qwen3.8-Flash-Next.** The other families, and the multi-model engine behind them,
   were removed.
 - **Windows**, **Intel Arc / SYCL**, and multi-GPU setups.
-- **macOS / Metal and AMD / ROCm.** The source for both is still here, unchanged from upstream, but
-  neither is built or tested and the normal build cannot compile either. If you get one working, say
-  so.
+- **macOS / Metal and AMD / ROCm.** The source for both is still here and the normal build cannot
+  compile either. Neither is built or tested on any machine the maintainer has, so treat both as
+  unverified: the Metal tree is kept consistent with the shared headers by inspection only, and the
+  last time a header gained a parameter the Metal stub was missed. If you get one working, say so.
 - No web interface, installer, model downloader, auto-update or image generation. None are planned.
 
 ## Speed and memory
@@ -207,15 +230,27 @@ against any other engine.
 
 | | |
 |---|---|
-| Load until ready | 16–18 s |
-| Reading your prompt | ~85 tokens/s |
-| Writing the answer | ~89 tokens/s |
-| GPU memory at peak | 11,670 MiB of 12,288 |
+| Load until ready | 15–18 s |
+| Reading your prompt | 1,281 tokens/s at 2K, 2,547 at 8K |
+| Writing the answer | ~98 tokens/s |
+| GPU memory at peak | 11,610 MiB of 12,288 for a short answer; 11,670 with the context full |
 | System RAM at peak | 43 GB |
 | Context | 32,768 tokens with `--kv int8` |
 
+Prompt reading is quoted at two lengths on purpose: the rate climbs with the prompt, because a fixed
+per-request cost is spread over more tokens. A single figure would be misleading, and an earlier
+version of this table quoted ~85 tokens/s, which was measured at a 67-token prompt and understated
+a realistic one by more than ten times.
+
 Turning the engine's containment off made no measurable difference — 88.5 against 89.0 tokens a
 second across several runs — so the protection costs you nothing.
+
+**Seven speed switches are on by default on an RTX 30-series card**, worth about +9.7% of that
+writing speed for 2 MiB of GPU memory. They also change the model's exact wording, so
+`docs/speed.md` is the disclosure: what they are, what each is worth, how to turn them off with
+`STRATA_SM86_PERF=0`, and how to re-measure them on a card that is not this one with
+`tools/bench_switches.py`. If your GPU is not an RTX 30-series, none of them are on and that
+document is where to start looking for the same win.
 
 ## Security
 

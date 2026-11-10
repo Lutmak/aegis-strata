@@ -1,7 +1,7 @@
 """tools/collect_profile_traces.py - routing traces of a varied set of prompts, for tools/make_profile_mix.py.
 
-For every prompt of a corpus (default bench/profile_corpus.json: 45 chat, code, maths, reasoning, writing, science, tool
-use and six-language prompts) it runs the engine once (greedy, --max-new tokens) and keeps the routed experts of the
+For every prompt of a corpus (--corpus is required: the 45-prompt set this used to default to lived in bench/, which
+this fork removed) it runs the engine once (greedy, --max-new tokens) and keeps the routed experts of the
 generated text:
 
     python tools/collect_profile_traces.py CONFIG.json OUTDIR [--corpus FILE] [--max-new 250] [--mode usage|routing]
@@ -50,14 +50,20 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("config")
     ap.add_argument("outdir")
-    ap.add_argument("--corpus", default=str(ROOT / "bench" / "profile_corpus.json"))
+    # Required, with no default. It defaulted to bench/profile_corpus.json, which this fork deleted, so the
+    # documented invocation died with a bare FileNotFoundError traceback from the json.load below.
+    ap.add_argument("--corpus", required=True,
+                    help="JSON array of prompts (bench/profile_corpus.json is no longer shipped)")
     ap.add_argument("--max-new", type=int, default=250)
     ap.add_argument("--mode", choices=("usage", "routing"), default="usage")
     ap.add_argument("--only", help="comma-separated prompt numbers (default all)")
     a = ap.parse_args()
     cfg = json.load(open(a.config, encoding="utf-8-sig"))
     tok = load_tokenizer(cfg["tokenizer"])
-    corpus = json.load(open(a.corpus, encoding="utf-8"))
+    corpus_path = Path(a.corpus)
+    if not corpus_path.is_file():
+        sys.exit(f"{ap.prog}: no corpus at {corpus_path}: pass --corpus <file.json>")
+    corpus = json.loads(corpus_path.read_text(encoding="utf-8"))
     out = Path(a.outdir)
     out.mkdir(parents=True, exist_ok=True)
     args = drop(drop(cfg["args"], "--serve"), "--batch", True)

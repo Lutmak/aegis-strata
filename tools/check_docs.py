@@ -57,8 +57,15 @@ FALLBACK_ANSWERABLE = (
     "server/tests/engine_test.cpp", "server/tests/fake-engine.py",
     "server/tests/literals_test.cpp", "server/tests/picture_cache_test.cpp",
     "server/tests/sandbox_test.cpp", "server/tests/e2e.sh",
-    "tools/check_docs.py",
+    "tools/check_docs.py", "tools/bench_switches.py", "tools/collect_profile_traces.py",
+    "src/core/nv_defaults.cpp", "include/strata/core/nv_defaults.hpp", "src/core/nv_defaults_test.cpp",
 )
+# NOT listed above, deliberately: tools/gguf_writer.py, tools/mtp_fetch.py and tools/strata_tokenizer.py are
+# unmodified from the import (`git diff --name-only 39cab36 -- <file>` is empty for each). Their comments cite
+# upstream's private design notes, which this distribution does not contain, and rewriting them would change
+# `git diff IMPORT HEAD` -- the provenance claim this repository's shape exists to protect. The README discloses
+# the class instead. They were briefly added here and the checker immediately and correctly reported six dead
+# references in them, which is the right answer to the wrong question: we are not answerable for them.
 
 # Documents this project does not publish. Naming one sends a reader somewhere they cannot go, so it
 # is an error wherever it appears -- a document, a comment, a build file or a string. Either publish
@@ -66,6 +73,18 @@ FALLBACK_ANSWERABLE = (
 # them (`PRINCIPLES invariant 1` names no file extension).
 UNPUBLISHED = ("PRINCIPLES", "ROADMAP", "STATE.md", "DESIGN.md", "TEST-PLAN.md",
                "RISKS.md", "INTEGRATION.md")
+
+# Directories this fork removed. A backticked path, anchor or citation under one of these can only be stale,
+# whatever else the heuristics below would make of it. `frontend/` is the one that proved the need: it was
+# renamed to `server/`, and because the GitHub-slug escape keys on "the first component is not a directory
+# here", every `frontend/<one component>` reference silently started passing.
+REMOVED_DIRS = ("frontend/", "bench/")
+
+
+def removed_ref(path: str) -> bool:
+    """True when `path` lies under a directory this fork removed and nothing has put it back."""
+    return path.startswith(REMOVED_DIRS) and not (ROOT / path).exists()
+
 
 # This file, which has to spell the names above in order to forbid them. A checker naming the thing it
 # bans is not the defect the ban exists to catch, and exempting it here is narrower than weakening the
@@ -90,7 +109,17 @@ SECCOMP_COUNT = re.compile(r"seccomp \((\d+) (?:instructions?|insns?)\)")
 # A line a document presents as program output and tells the reader to look for.
 QUOTED_LOG = re.compile(r"`(sandbox: [a-z][^`]{4,100})`")
 # `invariant 2 ("Nothing executes that was not compiled from source in this tree")`
-INVARIANT_GLOSS = re.compile(r"invariant (\d+)\s*\(\s*[\"“]([^\"”]{10,200})[\"”]\s*\)")
+# A numbered cross-reference that restates the invariant in its own words, in either form the documents use:
+#   invariant 5 ("No prompt ... is written to disk")      <- parenthesised, straight or curly quotes
+#   Invariant 2 — "the server makes no outbound ..."      <- em-dash, the form docs/security.md actually uses,
+#                                                            which the parenthesised-only pattern could not see,
+#                                                            so this check matched NOTHING in the whole tree and
+#                                                            reported a reassuring 0.
+# Case-insensitive, because the sentence-initial "Invariant" is the common spelling.
+INVARIANT_GLOSS = re.compile(
+    r"invariant (\d+)\s*(?:\(\s*[\"“]([^\"”]{10,200})[\"”]\s*\)|[—-]\s*[\"“]([^\"”]{10,200})[\"”])",
+    re.I,
+)
 # A C/C++ or Python string literal, for check 6.
 STRING_LITERAL = re.compile(r"\"((?:[^\"\\\n]|\\.)*)\"")
 
@@ -140,6 +169,21 @@ def tracked_files() -> list[str]:
     return found
 
 
+def new_here(tracked: set[str]) -> set[str]:
+    """Files that exist in the working tree but are not committed yet.
+
+    `git diff` cannot list an untracked file, so a file this change ADDS was in `tracked_files()` --
+    references *to* it resolved -- but in neither `authored()` nor `answerable()`, which both derive
+    from a diff. Its own claims were therefore checked by nothing, and the summary still said "0
+    problems". The gate is worst exactly where it matters: the pre-commit run meant to catch a bad
+    claim before it is committed is the blind one, and the blindness heals the moment you commit.
+    """
+    out = run_git("ls-files", "--others", "--exclude-standard")
+    if out is None:
+        return set()
+    return set(out.split()) & tracked
+
+
 def authored(tracked: set[str]) -> set[str]:
     """Files this fork wrote itself, plus every document and the build glue it rewrote.
 
@@ -157,7 +201,8 @@ def authored(tracked: set[str]) -> set[str]:
     out = run_git("diff", "--name-only", "--diff-filter=A", IMPORT)
     if out is None:
         return docs | glue | ours | {p for p in FALLBACK_ANSWERABLE if p in tracked}
-    return docs | glue | ours | (set(out.split()) & tracked)
+    # new_here(): a file added in the working tree is ours by definition, and `git diff` cannot see it.
+    return docs | glue | ours | new_here(tracked) | (set(out.split()) & tracked)
 
 
 def answerable(tracked: set[str]) -> set[str]:
@@ -175,7 +220,7 @@ def answerable(tracked: set[str]) -> set[str]:
     out = run_git("diff", "--name-only", IMPORT)
     if out is None:
         return docs | {p for p in FALLBACK_ANSWERABLE if p in tracked}
-    return docs | (set(out.split()) & tracked)
+    return docs | new_here(tracked) | (set(out.split()) & tracked)
 
 
 def resolve_md(name: str, citing: str, tracked: set[str]) -> bool:
@@ -305,6 +350,11 @@ def main() -> int:
         for m in ANCHOR.finditer(text):
             path, needle = m.group(1), m.group(2)
             if path not in tracked:
+                # Not silently, when it points into something this fork deleted: that is the one case where
+                # "not tracked" means "the reference is stale", and skipping it is why a reference into a
+                # removed directory could sit in the tree reporting 0 problems.
+                if removed_ref(path):
+                    problems.append(f"{rel}: anchors `{path}#{needle}` but {path} was removed from this fork")
                 continue
             counts["anchors"] += 1
             try:
@@ -319,7 +369,10 @@ def main() -> int:
         for m in CITATION.finditer(text):
             path, start = m.group(1), int(m.group(2))
             if path not in tracked:
-                skipped_citations += 1
+                if removed_ref(path):
+                    problems.append(f"{rel}: cites `{path}:{m.group(2)}` but {path} was removed from this fork")
+                else:
+                    skipped_citations += 1
                 continue
             counts["citations"] += 1
             if path in mine:
@@ -352,6 +405,14 @@ def main() -> int:
                 continue
             if any(path.startswith(p) for p in ("build/", "build-server/", "result/",
                                                 "upstream-ubs/", "nix/store", "models/")):
+                continue
+            # A reference into a directory this fork removed is always stale, and is tested FIRST: the
+            # slug escape below keys on "the first component is not a directory here", which became true
+            # of `frontend/` the moment it was renamed, so every `frontend/<one component>` reference
+            # started passing silently. The two-component ones were still caught, which is what made the
+            # gap look like it was not there.
+            if removed_ref(path):
+                problems.append(f"{rel}: mentions `{path}`, which was removed from this fork")
                 continue
             # An owner/repo slug (`robertkarl/llama.cpp`) is not a path: two components, and the
             # first is not a directory here.
@@ -395,11 +456,21 @@ def main() -> int:
         invariants = {}
         try:
             tm = (ROOT / "docs/security.md").read_text()
-            invariants = {int(n): h for n, h in re.findall(r"^#{2,4} (\d+)\.\s+(.+)$", tm, re.M)}
+            # `### 1.` ONLY, at exactly three hashes. `#{2,4}` matched two independently numbered series in
+            # that one document -- the six invariants at `###` and the eight limits at `####` -- and the dict
+            # kept the last per key, so invariants 1-6 were silently replaced by the limits and keys 7-8
+            # appeared although only six invariants exist. The table a gloss was checked against was the wrong
+            # table: a verbatim-correct gloss of invariant 2 was reported as a defect, while the false gloss
+            # `invariant 5 ("Landlock denies; it does not hide")` passed. Worse, the check could not fail at
+            # all -- it reported 0 glosses, because the only real one in the tree uses an em-dash form the
+            # pattern cannot see (see INVARIANT_GLOSS). Both halves are fixed; a wrong AND dormant check looks
+            # exactly like a passing one.
+            invariants = {int(n): h for n, h in re.findall(r"^### (\d+)\.\s+(.+)$", tm, re.M)}
         except OSError:
             pass
         for m in INVARIANT_GLOSS.finditer(text):
-            number, gloss = int(m.group(1)), m.group(2)
+            # group 2 is the parenthesised form, group 3 the em-dash one; exactly one of them matched.
+            number, gloss = int(m.group(1)), (m.group(2) or m.group(3))
             counts["invariants"] += 1
             heading = invariants.get(number)
             if heading is None:
