@@ -1340,8 +1340,18 @@ struct SmallTraits<MXFP4Block, 4> {
 // llama.cpp's generic multi-column table (ncols 2-4: 4 warps; 5-8: 2 warps; always 2 rows per block): faster,
 // equal to ncols = 1 only to float rounding (the cross-warp reduction groups partial sums differently).
 bool g_multi_exact = true;   // until the upstream layout is timed on an idle GPU (plan rule: default only what is measured)
-// B6 STRATA_B6_MMVQ_ROWS (lab, default 0 = off): see native_mmvq_set_b6_rows
-int g_b6_rows = [] { const char* v = std::getenv("STRATA_B6_MMVQ_ROWS"); return v ? std::atoi(v) : 0; }();
+// B6 STRATA_B6_MMVQ_ROWS (default 0 = off): see native_mmvq_set_b6_rows
+//
+// Read LAZILY, at first use, and not from a namespace-scope initializer. A namespace-scope initializer runs before
+// main, so a setenv from inside main -- which is what strata::core::apply_nv_defaults does for the sm_86 default
+// table -- would be read by nobody: the variable stayed 0 for the life of the process while the engine's startup
+// line announced the switch as on. Measured cost of that: 96.52 -> 97.48 tok/s, the switch's whole worth.
+// s26_tsum_on() below is the same pattern. Any future table that sets a STRATA_* variable needs its reader to be
+// lazy like this one.
+int& b6_rows() {
+    static int rows = [] { const char* v = std::getenv("STRATA_B6_MMVQ_ROWS"); return v ? std::atoi(v) : 0; }();
+    return rows;   // native_mmvq_set_b6_rows assigns through this reference
+}
 
 // S26 STRATA_TSUM=1 (TS): warp 0's NCOLS x ROWS sums as one transposed butterfly (s26_tsum.cuh), bitwise the same
 static bool s26_tsum_on() {
@@ -1634,15 +1644,16 @@ __global__ void b6_mmvq_rows_kernel(const typename F::Block* __restrict__ w, con
     }
 }
 
-// the B6 launch for a format that has a B6X: true when it ran.  g_b6_rows: 1 = 2 rows per block (the fastest on both
+// the B6 launch for a format that has a B6X: true when it ran.  b6_rows(): 1 = 2 rows per block (the fastest on both
 // cards in b6_mmvq_bench), else 2 / 4 / 8 rows.
 template<typename F, int NCOLS>
 bool b6_launch(const typename F::Block* w, const Q81Block* x, float* y, int n_in, int n_out, cudaStream_t s) {
     if constexpr (!B6X<F>::ok) {
         return false;
     } else {
-        if (g_b6_rows <= 0 || !g_multi_exact || s26_tsum_on() || n_in / F::DIV < 1) return false;
-        const int rows = g_b6_rows == 1 ? 2 : g_b6_rows;
+        const int b6 = b6_rows();
+        if (b6 <= 0 || !g_multi_exact || s26_tsum_on() || n_in / F::DIV < 1) return false;
+        const int rows = b6 == 1 ? 2 : b6;
         const dim3 threads(WARP, WARPS);
         if (rows == 2)
             b6_mmvq_rows_kernel<F, NCOLS, 2><<<unsigned((n_out + 1) / 2), threads, 0, s>>>(w, x, y, n_in, n_out);
@@ -2644,8 +2655,8 @@ void native_q6_k_unpack(const void* weights) {
 
 void native_mmvq_set_multi_exact(bool exact) { g_multi_exact = exact; }
 bool native_mmvq_multi_exact() { return g_multi_exact; }
-void native_mmvq_set_b6_rows(int mode) { g_b6_rows = mode; }
-int native_mmvq_b6_rows() { return g_b6_rows; }
+void native_mmvq_set_b6_rows(int mode) { b6_rows() = mode; }
+int native_mmvq_b6_rows() { return b6_rows(); }
 
 std::size_t native_q8_1_bytes(int n_in, int ncols) {
     validate_shape(n_in, ncols);

@@ -211,6 +211,13 @@ elseif(STRATA_ENABLE_CUDA)
     # build only, so the ready-made engine (sm_75+) keeps exactly the code it had
     add_compile_definitions(STRATA_EXPERIMENTAL_SM60=1)
   endif()
+  # -lineinfo: line tables for the device code, so Nsight Compute and `cuda-gdb` can attribute a hot instruction or a
+  # fault to a line of the .cu it came from. Without it a profile names the kernel and nothing inside it. It changes
+  # no generated instruction -- only the debug tables beside them -- so it costs no speed and no VRAM, just file size.
+  # Not for the gfx906 path, which compiles these same sources with HIP, where the flag does not exist.
+  if(NOT STRATA_HIP_GFX906)
+    add_compile_options($<$<COMPILE_LANGUAGE:CUDA>:-lineinfo>)
+  endif()
   message(STATUS "Strata: CUDA enabled, arch ${CMAKE_CUDA_ARCHITECTURES}")
   set(_strata_gpu_runtime_target CUDA::cudart)
   set(_strata_gpu_blas_target CUDA::cublas)
@@ -326,9 +333,12 @@ if(STRATA_ENABLE_CUDA OR STRATA_ENABLE_HIP)
     # the runtime device check (src/core/device.cu) admits the cards this build was made for (#236)
     target_compile_definitions(strata_core PRIVATE STRATA_EXPERIMENTAL_SM60=1)
   endif()
-  # The selected runtime is PUBLIC because graph.cpp is a HOST translation unit that calls cudaGraphLaunch and
-  # cudaEventQuery: the .cu sources get cudart through the CUDA language rules, a .cpp does not, and the
-  # linker error ("unresolved external symbol cudaGraphInstantiate") names the function rather than the cause.
+  # The selected runtime is PUBLIC because HOST translation units here call into the CUDA runtime directly --
+  # src/core/mtp.cpp and src/core/verify.cpp call cudaGraphUpload, cudaGraphExecDestroy and cudaEventQuery. The
+  # .cu sources get cudart through the CUDA language rules, a .cpp does not, and the linker error ("unresolved
+  # external symbol cudaGraphInstantiate") names the function rather than the cause.
+  # Do not demote this to PRIVATE: the comment used to cite src/core/graph.cpp, which this fork deleted, and a
+  # reader who checked only that file would have concluded the reason was gone.
   target_link_libraries(strata_core PUBLIC strata_plan strata_warnings ${_strata_gpu_runtime_target})
 
   add_executable(strata-device src/core/device_main.cpp)
@@ -534,7 +544,7 @@ if(STRATA_ENABLE_CUDA OR STRATA_ENABLE_HIP)
     src/core/remote_expert_opt.cu
     src/core/expert_cache.cpp src/core/native_head.cpp src/core/native_dense.cpp src/core/verify.cpp src/core/mtp.cpp
     src/core/conversation_snapshot.cpp src/core/conversation_state.cpp src/core/conversation_memory.cpp src/core/peer_experts.cpp
-    src/core/arch_defaults.cpp src/core/vmm.cpp src/core/conversation_file.cpp)
+    src/core/arch_defaults.cpp src/core/nv_defaults.cpp src/core/vmm.cpp src/core/conversation_file.cpp)
   target_include_directories(strata_engine PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
   target_link_libraries(strata_engine PUBLIC strata_core strata_kernels strata_kernels_cpu ${_strata_gpu_runtime_target})
   if(STRATA_BUILD_TESTS AND STRATA_ENABLE_CUDA AND NOT STRATA_HIP_GFX906)
@@ -1953,6 +1963,13 @@ if(STRATA_FRONTEND AND STRATA_NATIVE_EXPERTS)
   target_compile_features(literals_test PRIVATE cxx_std_20)
   add_executable(picture_cache_test EXCLUDE_FROM_ALL server/tests/picture_cache_test.cpp)
   target_include_directories(picture_cache_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/server)
+
+  # The sm_86 default table (strata/core/nv_defaults.hpp). Built here, with the other no-GPU tests, rather than
+  # beside arch_defaults_test under the CUDA build: that one is registered with ctest and ctest's targets are not
+  # built by `make build`, so it never runs. This one runs in `make test` on any Linux box.
+  add_executable(nv_defaults_test EXCLUDE_FROM_ALL src/core/nv_defaults_test.cpp src/core/nv_defaults.cpp)
+  target_include_directories(nv_defaults_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+  target_compile_features(nv_defaults_test PRIVATE cxx_std_20)
   target_compile_features(picture_cache_test PRIVATE cxx_std_20)
   find_package(Threads REQUIRED)
   target_link_libraries(picture_cache_test PRIVATE Threads::Threads)

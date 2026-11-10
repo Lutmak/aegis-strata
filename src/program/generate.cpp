@@ -17,6 +17,7 @@
 
 #include "strata/platform/memory.hpp"
 #include "strata/core/arch_defaults.hpp"
+#include "strata/core/nv_defaults.hpp"
 #include "strata/kernels/gfx_arch.hpp"
 #include "strata/core/dma_batch.hpp"
 #include "strata/core/device.hpp"
@@ -2179,7 +2180,12 @@ static double ple_direct_rows_per_s(strata::kernels::PleTable& t) {
     return el > 0 ? (double) done / el : -1.0;
 }
 
-int main(int argc, char** argv) {
+// The body of the program. `main` below is a handler around it: a CUDA launch or sync that fails throws
+// std::runtime_error (the convention in every native_*.cu, and now in s2_expert_grouped.cu's `check` and
+// shared_expert.cu too), and with nothing catching it that throw reached std::terminate and aborted the process.
+// An abort in the middle of a request means the server gets no line at all and the client waits for a response
+// that is never coming, which is the worst of the available outcomes.
+static int run(int argc, char** argv) {
     // **UNBUFFERED, BECAUSE THE INTERESTING OUTPUT IS THE OUTPUT BEFORE A CRASH.**  `stdout` redirected to a
     // pipe or a file is block-buffered, so a program that dies loses every line it had already printed - which
     // turns "it crashed at step 7" into "it crashed somewhere", and the difference is a debugging session.
@@ -2620,6 +2626,27 @@ int main(int argc, char** argv) {
         cudaDeviceProp ad{};
         if (cudaGetDeviceProperties(&ad, 0) == cudaSuccess) strata::core::apply_arch_defaults(ad.gcnArchName);
         else (void) cudaGetLastError();
+    }
+#elif !defined(STRATA_HIP_GFX906)   // a real CUDA build: not HIP above, and not the gfx906 HIP compat layer
+    {   // sm_86: the measured speed switches are on by default (strata/core/nv_defaults.hpp and docs/speed.md).
+        // Here for the same two reasons as the HIP block above -- before any engine code reads its switches, and the
+        // user's own settings are kept -- and device 0 is the right device because --gpu has already set
+        // CUDA_VISIBLE_DEVICES above, before the first CUDA call.
+        //
+        // Unlike the gfx1151 table this one changes the token ids; `STRATA_SM86_PERF=0` turns it off.
+        cudaDeviceProp nd{};
+        const cudaError_t ne = cudaGetDeviceProperties(&nd, 0);
+        if (ne == cudaSuccess) {
+            strata::core::apply_nv_defaults(nd.major, nd.minor);
+        } else {
+            // Said out loud, not swallowed. The switches simply do not apply, which is a safe outcome -- but
+            // docs/speed.md tells the reader the engine prints a line every time it applies them, so silence here
+            // reads as "the defaults are on" when they are not, and the operator wonders why decode is ~10% slow.
+            std::fprintf(stderr, "strata: could not read the device's compute capability (%s), so the sm_86 speed "
+                                 "switches were NOT applied; decode will be slower (docs/speed.md)\n",
+                         cudaGetErrorString(ne));
+            (void) cudaGetLastError();   // clear it: this is not a failure, and it must not surface later
+        }
     }
 #endif
 #if defined(STRATA_USE_HIP) && !defined(_WIN32)
@@ -15971,4 +15998,21 @@ int main(int argc, char** argv) {
     cudaFree(sbuf);
     cudaFree(arena);
     return 0;
+}
+
+int main(int argc, char** argv) {
+    try {
+        return run(argc, argv);
+    } catch (const std::exception& e) {
+        // `ERR <text>` is the line protocol's error (server/engine.hpp): the server fails the request in flight
+        // with it and the client gets a 500 rather than silence. stdout is unbuffered here, so the line is out
+        // before this returns.
+        std::printf("ERR %s\n", e.what());
+        std::fflush(stdout);
+        std::fprintf(stderr, "strata: the request failed: %s\n", e.what());
+        // Answer, then end, rather than serve on. A window that threw part way through left the session's GPU
+        // state half advanced, and a CUDA error of the sticky kind poisons the context so every later launch
+        // fails too. The server ends with the engine and a unit with Restart=on-failure brings the pair back.
+        return 1;
+    }
 }
