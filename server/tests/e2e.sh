@@ -14,6 +14,44 @@ URL=http://127.0.0.1:$PORT
 LOG=$(mktemp "${TMPDIR:-/tmp}/us2-e2e-XXXXXX")   # no suffix after the Xs: BSD mktemp rejects it
 fail=0
 check() { if [ "$1" = 0 ]; then echo "ok   $2"; else echo "FAIL $2"; fail=1; fi; }
+
+# Prefer a recoverable delete for the scratch files, per this project's own rule, but stay runnable on a machine
+# that has no `trash`.
+scrub() { if command -v trash >/dev/null 2>&1; then trash "$@" 2>/dev/null || true; else command rm -f "$@"; fi; }
+
+# wait_exit PID SECONDS: sets WAIT_RC to the process's exit code, or 124 if it outlived the bound (and is then
+# killed). The answer comes back in a variable and NOT on stdout, because `$(...)` would run this in a subshell
+# where `wait` cannot see the caller's background jobs and returns 127 for every process.
+#
+# Plain `wait` has no timeout, so a server that failed to exit used to hang the whole suite instead of failing it:
+# two deliberately broken builds took 321 s and 602 s and were only noticed because a human was watching. A test
+# for "the process ends" must itself end.
+WAIT_RC=0
+wait_exit() {
+    local pid=$1 secs=$2 i
+    for i in $(seq 1 $((secs * 5))); do
+        if ! kill -0 "$pid" 2>/dev/null; then wait "$pid" 2>/dev/null; WAIT_RC=$?; return 0; fi
+        sleep 0.2
+    done
+    kill -9 "$pid" 2>/dev/null; wait "$pid" 2>/dev/null
+    WAIT_RC=124
+}
+
+# ready_or_fail PID PORT WHAT -> 0 once /health answers 200, 1 otherwise. Asserted by the caller, never ignored:
+# a silent fall-through here made later checks pass vacuously, because a server that is not ready yet answers 503
+# to everything, which is also what a working timeout looks like.
+ready_or_fail() {
+    local pid=$1 port=$2 what=$3 i
+    for i in $(seq 1 100); do
+        if curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:$port/health" 2>/dev/null | grep -q 200; then
+            return 0
+        fi
+        if ! kill -0 "$pid" 2>/dev/null; then echo "FAIL $what exited before it was ready"; return 1; fi
+        sleep 0.2
+    done
+    echo "FAIL $what never became ready in 20 s"
+    return 1
+}
 # j EXPR: evaluate a Python expression over the JSON on stdin (bound to `d`); the test needs python3 anyway, not jq.
 j() { python3 -c 'import json,sys; d=json.load(sys.stdin); r=eval(sys.argv[1]); print(json.dumps(r) if isinstance(r,(dict,list)) else ("true" if r is True else "false" if r is False else "null" if r is None else r))' "$1" 2>/dev/null; }
 
@@ -170,6 +208,71 @@ PY
 echo "$lit" | sed 's/^/     /'
 check $rc "control-token texts inside messages are text (literals)"
 check $(grep -q "control-token texts inside the messages are sent as text" "$TPL_LOG" && echo 0 || echo 1) "server logged the literals"
+
+# a wedged engine: the request is answered inside the timeout instead of hanging until someone restarts the server.
+# The fake engine takes the GEN and writes nothing back, ever, with its stdout still open -- so this is the silence
+# case, not the EOF case the engine-exits path already covered. Before this bound existed the request never ended and
+# /health went on answering "ok" with busy=true.
+WEDGE_PORT=$((PORT + 3)); WEDGE_URL=http://127.0.0.1:$WEDGE_PORT
+WEDGE_LOG=$(mktemp "${TMPDIR:-/tmp}/us2-e2e-wedge-XXXXXX"); WOUT=$(mktemp "${TMPDIR:-/tmp}/us2-e2e-wout-XXXXXX")
+FAKE_WEDGE=1 "$BIN" --engine "$HERE/fake-engine.py" -m "$MODEL" --engine-timeout 3 --host 127.0.0.1 --port "$WEDGE_PORT" --alias fake -- --max-context 4096 > "$WEDGE_LOG" 2>&1 &
+WEDGE_PID=$!
+BYE_PID=""; BYE_LOG=""   # declared before the trap so it can clean them up even if we exit early
+trap 'kill $PID $SLOW_PID $TPL_PID $WEDGE_PID $BYE_PID 2>/dev/null; wait $PID $SLOW_PID $TPL_PID 2>/dev/null; scrub "$LOG" "$SLOW_LOG" "$TPL_LOG" "$BIG" "$WEDGE_LOG" "$WOUT" $BYE_LOG' EXIT
+if ! ready_or_fail $WEDGE_PID "$WEDGE_PORT" "wedge server"; then cat "$WEDGE_LOG"; exit 1; fi
+t0=$(date +%s)
+wcode=$(curl -s -o "$WOUT" -w '%{http_code}' --max-time 40 "$WEDGE_URL/v1/chat/completions" -H 'content-type: application/json' -d '{"model":"fake","messages":[{"role":"user","content":"hello"}],"max_tokens":8}')
+elapsed=$(( $(date +%s) - t0 ))
+check $([ "$wcode" = 503 ] && echo 0 || echo 1) "wedged engine -> 503 in ${elapsed}s (got $wcode): $(j 'd["error"]["message"]' < "$WOUT")"
+check $([ "$elapsed" -lt 20 ] && echo 0 || echo 1) "wedged engine answered after ${elapsed}s, not never (3 s timeout)"
+check $(grep -q "the engine did not respond" "$WEDGE_LOG" && echo 0 || echo 1) "server logged the engine timeout"
+# and it ends, non-zero, so a unit with Restart=on-failure brings the pair back: a server that kept serving with a
+# wedged engine would answer "ok" to /health and hang every later request the same way.
+wait_exit $WEDGE_PID 20; wrc=$WAIT_RC
+check $([ "$wrc" = 1 ] && echo 0 || echo 1) "server exited $wrc (1 = restart me) after giving up on the engine"
+
+# An ordinary shutdown exits 0. This is the other half of the wedge check above: the two engine-failure paths exit
+# non-zero on purpose so a unit with Restart=on-failure brings the pair back, which only works if being ASKED to
+# stop is distinguishable from failing. It was not -- strata_context::terminate() quits the engine itself, the
+# supervisor then saw it gone and reported a crash, and `systemctl stop` would have restarted the server for ever.
+BYE_LOG=$(mktemp "${TMPDIR:-/tmp}/us2-e2e-bye-XXXXXX")
+bye_n=0
+for sig in TERM INT; do
+    # A fresh port per iteration. Reusing one meant the second bind could land on the first server's lingering
+    # socket, after which the readiness loop gave up, the signal hit a dead pid, and the failure looked like a
+    # mystery rather than a port clash.
+    bye_n=$((bye_n + 1)); BYE_PORT=$((PORT + 4 + bye_n))
+    "$BIN" --engine "$HERE/fake-engine.py" -m "$MODEL" --host 127.0.0.1 --port "$BYE_PORT" --alias fake -- --max-context 4096 > "$BYE_LOG" 2>&1 &
+    BYE_PID=$!
+    if ! ready_or_fail $BYE_PID "$BYE_PORT" "SIG$sig server"; then fail=1; continue; fi
+    # After a real request, so the engine has been used and not just started -- and the request is CHECKED, because
+    # a not-yet-ready server answers 503 to everything and would have let the rest of this block pass vacuously.
+    bcode=$(curl -s -o /dev/null -w '%{http_code}' --max-time 20 "http://127.0.0.1:$BYE_PORT/v1/chat/completions" -H 'content-type: application/json' -d '{"model":"fake","messages":[{"role":"user","content":"hi"}],"max_tokens":4}')
+    check $([ "$bcode" = 200 ] && echo 0 || echo 1) "SIG$sig server served a request first (got $bcode)"
+    kill -$sig $BYE_PID 2>/dev/null
+    wait_exit $BYE_PID 20; brc=$WAIT_RC
+    check $([ "$brc" = 0 ] && echo 0 || echo 1) "SIG$sig during service exits $brc (0 = asked to stop, not a failure)"
+done
+
+# The half the idle checks above cannot see: a signal arriving while a generation is actually RUNNING. That used to
+# abort the process -- exit 134, core dumped, "terminate called without an active exception" -- because the request's
+# own HTTP handler was parked in the result queue and llama.cpp's server-queue std::terminate()s a parked reader
+# rather than returning to HTTP code. For a server that runs one request at a time behind a coding agent this is the
+# COMMON case for `systemctl stop`, and with Restart=on-failure a 134 restarts the pair it was just told to stop.
+for sig in TERM INT; do
+    bye_n=$((bye_n + 1)); BYE_PORT=$((PORT + 4 + bye_n))
+    FAKE_N_TOKENS=64 FAKE_DELAY_MS=120 "$BIN" --engine "$HERE/fake-engine.py" -m "$MODEL" --host 127.0.0.1 --port "$BYE_PORT" --alias fake -- --max-context 4096 > "$BYE_LOG" 2>&1 &
+    BYE_PID=$!
+    if ! ready_or_fail $BYE_PID "$BYE_PORT" "SIG$sig mid-request server"; then fail=1; continue; fi
+    # 64 tokens at 120 ms each: the request is still streaming when the signal lands.
+    curl -s -o /dev/null --max-time 30 -N "http://127.0.0.1:$BYE_PORT/v1/chat/completions" -H 'content-type: application/json' -d '{"model":"fake","messages":[{"role":"user","content":"hi"}],"max_tokens":64,"stream":true}' &
+    CURL_PID=$!
+    sleep 1.5
+    kill -$sig $BYE_PID 2>/dev/null
+    wait_exit $BYE_PID 25; mrc=$WAIT_RC
+    kill $CURL_PID 2>/dev/null; wait $CURL_PID 2>/dev/null
+    check $([ "$mrc" = 0 ] && echo 0 || echo 1) "SIG$sig DURING a generation exits $mrc (0 = clean; 134 was an abort with a core dump)"
+done
 
 # tokenize / detokenize round trip
 t=$(curl -s "$URL/tokenize" -H 'content-type: application/json' -d '{"content":"Hello, world!"}' | j 'd["tokens"]')

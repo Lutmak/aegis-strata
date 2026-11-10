@@ -25,6 +25,7 @@
 #include "mtmd-helper.h"
 
 #include <algorithm>
+#include <climits>
 #include <atomic>
 #include <cinttypes>
 #include <cstdio>
@@ -46,11 +47,23 @@ constexpr int ENGINE_POLL_MS = 20;
 // this: every request without max_tokens got a 500 until the server counted it.
 constexpr int ENGINE_CONTEXT_RESERVE = 8;
 
+// --engine-timeout: how long a running request tolerates complete silence from the engine before the server stops
+// waiting. Silence this long means it is wedged, not slow.
+//
+// Where the default comes from: reading the prompt is the one stretch of a request with no output at all, because
+// the engine sends no PP progress line during it. Measured on the reference machine, an 8,257-token prompt is
+// 3.46 s of silence, so the whole 32,768-token context is about 13 s; generation then sends a line per token.
+// 120 s is an order of magnitude above the worst legitimate case and still bounds a wedge to two minutes rather
+// than for ever. 0 turns the bound off. Model loading is not covered by this: it happens before any request, and
+// Engine::wait_ready bounds it separately.
+constexpr int ENGINE_SILENCE_MS_DEFAULT = 120 * 1000;
+
 // mirrors server_slot in server-context.cpp, for the one slot the engine is
 struct Slot {
     std::unique_ptr<server_task> task;
 
     bool started    = false; // GEN written
+    int64_t last_heard_ms = 0; // when the engine last wrote any line about this request; 0 before GEN
     bool cancelled  = false; // the client went away: STOP sent, output is drained, no final result
     bool stop_sent  = false; // STOP sent for our own reason (stop string, limit); the final result is still sent
 
@@ -171,12 +184,19 @@ std::string file_stem(const std::string & path) {
 // two differ: a kernel without Landlock, a macOS build, and a refused network namespace are each a distinct
 // state an operator needs to tell apart, and reporting them all as "enforced" or all as "off" hides the
 // difference that matters.
-enum class SandboxState { Off, Unavailable, Enforced, EnforcedNoNetns };
+// The reported outcomes. A partial enforcement gets its OWN name, because the one thing this project must not
+// do is let a security control degrade silently: below Landlock ABI 9 the pathname AF_UNIX closure is simply
+// absent -- the engine can still reach /run/user/<uid>/bus and ask systemd for a unit outside the sandbox --
+// and reporting that as plain "enforced" told the operator nothing was missing. We do not refuse to start
+// (the hole was open on every kernel before the closure existed, and refusing would break kernels that work
+// today); we name it, here, in /health and in /props, and docs/sandbox.md states the floor.
+enum class SandboxState { Off, Unavailable, Enforced, EnforcedNoNetns, EnforcedNoUnixPath };
 
 const char * sandbox_state_name(SandboxState s) {
     switch (s) {
-        case SandboxState::Enforced:        return "enforced";
-        case SandboxState::EnforcedNoNetns: return "enforced-no-netns";
+        case SandboxState::Enforced:           return "enforced";
+        case SandboxState::EnforcedNoNetns:    return "enforced-no-netns";
+        case SandboxState::EnforcedNoUnixPath: return "enforced-no-unix-path";
         case SandboxState::Unavailable:     return "unavailable";
         default:                            return "off";
     }
@@ -226,6 +246,15 @@ struct strata_context_impl {
     std::vector<std::string> sandbox_allow_write;      // --sandbox-allow-write
     long long                n_ctx = 0;
     std::atomic<bool>        engine_dead{false};
+    // Why the engine was lost, for the operator's log. Two different things used to share one string: a wedge
+    // reported "the engine closed its output", which is exactly what had NOT happened -- its pipe was still open,
+    // which is the premise of the timeout path -- so the log contradicted itself and sent the reader at the wrong
+    // process. Set beside engine_dead, always, by lose_the_engine().
+    std::atomic<const char*> engine_dead_why{nullptr};
+    // Set by request_stop() before the task queue is told to return. A deliberate stop quits the engine on
+    // purpose, so the engine going away while this is set is not a failure and must not reach the exit code.
+    std::atomic<bool>        stopping{false};
+    int                      engine_timeout_ms = ENGINE_SILENCE_MS_DEFAULT;   // --engine-timeout
 
     Slot slot;
 
@@ -303,11 +332,55 @@ struct strata_context_impl {
             if (!engine.next_line(line, std::max(left, 0))) {
                 break; // nothing more right now
             }
+            slot.last_heard_ms = Engine::now_ms();   // before handle_line: that call can release the slot
             handle_line(line);
             if (left <= 0) {
                 break;
             }
         }
+        give_up_on_a_silent_engine();
+    }
+
+    // A wedged engine -- a hung kernel, a deadlock inside the engine process -- writes nothing and never closes its
+    // pipe, so EngineLine::EOF_ never comes and the loop above just re-posts NEXT_RESPONSE for ever: the request
+    // hangs until someone restarts the server by hand, while /health still answers "ok".
+    //
+    // Treated exactly as the engine exiting is (see EngineLine::EOF_): the request gets its error and the process
+    // ends, non-zero, so a unit with Restart=on-failure brings both back. Nothing lighter would do. This server
+    // deliberately does not fork a replacement engine out of a process that already has threads (the note in
+    // main.cpp), and the engine runs one request at a time, so every later request would wedge the same way.
+    void give_up_on_a_silent_engine() {
+        if (!slot.active() || !slot.started || engine_timeout_ms <= 0 || stopping) {
+            return;
+        }
+        const int64_t silent_ms = Engine::now_ms() - slot.last_heard_ms;
+        if (silent_ms < engine_timeout_ms) {
+            return;
+        }
+        SRV_ERR("task %d: the engine did not respond for %lld ms; giving up on it\n",
+                slot.task->id, (long long) silent_ms);
+        // Seconds, rounded up, so a sub-second bound does not tell the client "within 0 s".
+        const int shown_s = (engine_timeout_ms + 999) / 1000;
+        lose_the_engine("the engine stopped responding and its output is still open",
+                        "the engine did not respond within " + std::to_string(shown_s) + " s");
+    }
+
+    // The one place the engine is given up on, for either reason: it closed its output, or it went silent past
+    // --engine-timeout. These were two near-identical blocks, which is how they came to disagree -- one of them
+    // skipped the shutdown guard, so an ordinary `systemctl stop` while a request was in flight exited 1 and, with
+    // the Restart=on-failure the README recommends, restarted the pair it had just been told to stop; and both
+    // reported the same reason to the operator although only one of them was true.
+    void lose_the_engine(const char * why, const std::string & client_msg) {
+        if (!slot.cancelled && slot.active()) {
+            send_error(*slot.task, client_msg, ERROR_TYPE_UNAVAILABLE);
+        }
+        finish_slot();
+        if (stopping) {
+            return;   // asked to stop: the engine is meant to be going away, so this is not a failure
+        }
+        engine_dead_why = why;
+        engine_dead     = true;
+        queue_tasks.terminate();
     }
 
     // ---- one request --------------------------------------------------------------------------------------------
@@ -370,6 +443,7 @@ struct strata_context_impl {
             return;
         }
         slot.started = true;
+        slot.last_heard_ms = Engine::now_ms();   // the silence bound starts when the request goes out
         slot.stats.update_prompt_start();
         SRV_INF("task %d: %s prompt=%d n_predict=%d\n", t.id, header.c_str(), n_prompt, slot.n_predict);
 
@@ -736,12 +810,7 @@ struct strata_context_impl {
 
             case EngineLine::EOF_:
                 SRV_ERR("%s", "the engine closed its output during a request\n");
-                if (!slot.cancelled) {
-                    send_error(*slot.task, "the engine exited during the request", ERROR_TYPE_UNAVAILABLE);
-                }
-                finish_slot();
-                engine_dead = true;
-                queue_tasks.terminate();
+                lose_the_engine("the engine closed its output", "the engine exited during the request");
                 break;
 
             case EngineLine::INFO:
@@ -1351,9 +1420,22 @@ bool strata_context::start_engine(const common_params & params, const std::strin
     // refuses an unprivileged user namespace degrades the sandbox without failing it. Logging "enforced" before
     // the fork could only ever have reported the request.
     if (impl->sandbox_enabled) {
-        impl->sandbox_state = impl->engine.sandbox_netns() ? SandboxState::Enforced : SandboxState::EnforcedNoNetns;
-        LOG_INF("sandbox: %s (%s)\n",
-                impl->sandbox_state == SandboxState::Enforced ? "enforced" : "ENFORCED WITHOUT A NETWORK NAMESPACE",
+        // Two independent degradations, each named rather than folded into "enforced". The netns one is
+        // reported first because it is the wider hole.
+        if (!impl->engine.sandbox_netns()) {
+            impl->sandbox_state = SandboxState::EnforcedNoNetns;
+        } else if (impl->sandbox.landlock_abi < 9) {
+            impl->sandbox_state = SandboxState::EnforcedNoUnixPath;
+        } else {
+            impl->sandbox_state = SandboxState::Enforced;
+        }
+        const char * headline = "enforced";
+        if (impl->sandbox_state == SandboxState::EnforcedNoNetns) {
+            headline = "ENFORCED WITHOUT A NETWORK NAMESPACE";
+        } else if (impl->sandbox_state == SandboxState::EnforcedNoUnixPath) {
+            headline = "ENFORCED WITHOUT THE AF_UNIX PATH CLOSURE (landlock abi < 9)";
+        }
+        LOG_INF("sandbox: %s (%s)\n", headline,
                 aegis::sandbox_describe(impl->sandbox, impl->engine.sandbox_netns()).c_str());
     }
     return true;
@@ -1368,6 +1450,14 @@ void strata_context::set_sandbox(bool enabled, std::vector<std::string> allow_re
 
 void strata_context::set_picture_cache(size_t entries, size_t bytes) {
     impl->pictures.configure(entries, bytes);
+}
+
+void strata_context::set_engine_timeout(int seconds) {
+    // int64 for the multiply. In `int` it overflowed for anything past about 2,147,483 s and the negative result
+    // read as 0, i.e. "no bound" -- a bigger number silently meaning less safety. main.cpp now also refuses a
+    // value past a day, so this is the second of two guards rather than the only one.
+    const int64_t ms = seconds > 0 ? (int64_t) seconds * 1000 : 0;
+    impl->engine_timeout_ms = (int) std::min<int64_t>(ms, INT_MAX);
 }
 
 bool strata_context::load(common_params & params, std::string & err) {
@@ -1473,6 +1563,25 @@ void strata_context::start_loop() {
     impl->queue_tasks.start_loop();
 }
 
+void strata_context::request_stop() {
+    // Only this. See the note on the declaration: tearing the result queue down with a reader parked in it
+    // aborts the process, so a signal handler must not do more than ask the task loop to return.
+    impl->stopping = true;
+    impl->queue_tasks.terminate();
+}
+
+bool strata_context::fail_inflight(const std::string & why) {
+    if (!impl->slot.active()) {
+        return false;
+    }
+    SRV_INF("task %d: %s\n", impl->slot.task->id, why.c_str());
+    if (!impl->slot.cancelled) {
+        impl->send_error(*impl->slot.task, why, ERROR_TYPE_UNAVAILABLE);
+    }
+    impl->slot.release();
+    return true;
+}
+
 void strata_context::terminate() {
     impl->queue_tasks.terminate();
     impl->queue_results.terminate();
@@ -1485,7 +1594,8 @@ void strata_context::terminate() {
 
 bool strata_context::engine_exited(std::string & why) {
     if (impl->engine_dead) {
-        why = "the engine closed its output";
+        const char * w = impl->engine_dead_why.load();
+        why = w != nullptr ? w : "the engine was lost during a request";
         return true;
     }
     return impl->engine.reap_exit(why);
@@ -1493,6 +1603,10 @@ bool strata_context::engine_exited(std::string & why) {
 
 bool strata_context::engine_alive() const {
     return impl->engine.alive() && !impl->engine_dead;
+}
+
+bool strata_context::engine_failed() const {
+    return impl->engine_dead;
 }
 
 long long strata_context::n_ctx() const {

@@ -15,6 +15,9 @@ Environment variables choose the answers, so one script covers the cases:
   FAKE_DIE_AFTER  if set, exit 3 after emitting this many tokens of the first request
   FAKE_NO_STOP    if set, READY without "stop": STOP is ignored and the request runs to its end
   FAKE_PROMPT_N   if set, lie about the prompt size in DONE (mismatch test)
+  FAKE_WEDGE      if set, accept the request and never answer it: no PP, no tokens, no DONE, no ERR,
+                  and STOP is ignored, which is how a hung CUDA call behaves. stdout stays open, so
+                  the server sees silence rather than EOF. QUIT is still honoured so teardown is clean.
 """
 import os
 import select
@@ -79,6 +82,11 @@ while True:
     if env("FAKE_ERR"):
         say("ERR " + env("FAKE_ERR"))
         continue
+    if env("FAKE_WEDGE"):
+        # Wedged: the request is accepted and nothing is ever written back. Only QUIT gets out of here.
+        while True:
+            if sys.stdin.readline() in ("", "QUIT\n"):
+                sys.exit(0)
     say("RESUME 0")
     say("PP %d %d 1 1000" % (prompt_n, prompt_n))
     if env("FAKE_N_TOKENS"):

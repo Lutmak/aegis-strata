@@ -413,8 +413,23 @@ int main(int argc, char ** argv) {
     CHECK(has(o.out, "procself=ok"));
     CHECK(has(o.out, "proc_meminfo=ok"));
     CHECK(has(o.out, "proc_other=denied"));
-    CHECK(has(o.out, "unixpath=denied"));
-    CHECK(has(o.out, "signal=denied"));
+    // Gated on the kernel's Landlock ABI, like the network-namespace check below it, because the sandbox
+    // deliberately degrades rather than refusing to start: RESOLVE_UNIX (the pathname AF_UNIX closure) needs
+    // ABI 9 and the SIGNAL scope needs ABI 6, and sandbox_available() accepts anything from ABI 1. Asserted
+    // unconditionally, these turned every pre-ABI-9 kernel's `make test` red in a way that reads as a
+    // regression in this fork rather than "this kernel cannot enforce that control". A skip line says which.
+    if (plan.landlock_abi >= 9) {
+        CHECK(has(o.out, "unixpath=denied"));
+    } else {
+        std::printf("skip:  landlock abi %d < 9: no RESOLVE_UNIX, so a pathname AF_UNIX socket is NOT denied "
+                    "(docs/sandbox.md names the floor)\n", plan.landlock_abi);
+    }
+    if (plan.landlock_abi >= 6) {
+        CHECK(has(o.out, "signal=denied"));
+    } else {
+        std::printf("skip:  landlock abi %d < 6: no SIGNAL scope, so signalling out is NOT denied\n",
+                    plan.landlock_abi);
+    }
     const bool netns = o.notes.empty();
     if (netns) {
         CHECK(has(o.out, "ifaces=1"));   // only `lo`

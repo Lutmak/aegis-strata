@@ -113,7 +113,9 @@ identity uid/gid maps → a Landlock ruleset (default-deny filesystem, explicit 
   process with no network, no readable `$HOME` outside the model directory, no writable path except
   `/dev/shm` and what was asked for. It can still *receive* a descriptor over an AF_UNIX socket
   (`SCM_RIGHTS`) from another process of the same uid, which is the residual egress `security.md`
-  §4 describes; AF_UNIX itself cannot be denied because CUDA needs it.
+  §4 describes. `socket(AF_UNIX)` itself cannot be denied because CUDA needs local IPC — but from
+  Landlock ABI 9 the engine is given no path on which it may *connect* one, which closes the escape
+  route that mattered. See "AF_UNIX: the socket stays, the destinations go" below.
   A tampered CUDA toolkit or driver userspace gets the same, *except* through the GPU ioctl
   interface, which is not namespaced (see `security.md`).
 - **Costs:** one new file, measured at 710 lines / 245 statements as written (the rest is comment, the UAPI fallbacks and the non-Linux stub), one `#if defined(__linux__)`, no new dependency, no privilege
@@ -261,12 +263,48 @@ any of them.
 | `userfaultfd` | 282 | a standard kernel-exploit and TOCTOU primitive; nothing here uses it. |
 | `keyctl` / `add_key` / `request_key` | 250 / 248 / 249 | the kernel keyring is a credential store this process has no business in. |
 
+### AF_UNIX: the socket stays, the destinations go
+
+`socket(AF_UNIX)` is permitted, because CUDA's local IPC needs it and an argument filter cannot tell
+CUDA's socket from any other. Permitting the socket is not the same as permitting what it can reach,
+and what it could reach was the one real escape found in this design.
+
+**What was reachable.** A pathname AF_UNIX socket is a filesystem object. With `connect` permitted
+and no Landlock right governing socket resolution, a contained engine could connect to
+`/run/user/<uid>/bus`, `/run/user/<uid>/systemd/private` or `/run/dbus/system_bus_socket`,
+authenticate with `AUTH EXTERNAL` (the peer credentials are genuinely ours), and ask systemd to
+start a transient unit. That unit runs **outside** the sandbox, with the host network. Neither of
+the other two mechanisms covers this: the network namespace is irrelevant because no network is
+involved, and the seccomp filter has to keep `connect` for CUDA.
+
+**What closes it.** `LANDLOCK_ACCESS_FS_RESOLVE_UNIX` is added to the ruleset's *handled* set and
+granted on **no path at all**. Landlock's default-deny then refuses every pathname AF_UNIX
+`connect`, while leaving the socket, `socketpair` and the already-open descriptors CUDA needs
+untouched. Three properties make this safe to add rather than a new risk:
+
+- Landlock requires `allowed_access ⊆ handled`, so adding a right to `handled` cannot invalidate the
+  ~30 existing path rules.
+- The abstract namespace (`\0`-prefixed names) has no path for a rule to name, so Landlock cannot
+  see it at all; `LANDLOCK_SCOPE_ABSTRACT_UNIX_SOCKET` covers that variant instead.
+- `ruleset_attr_size()` sends the exact struct prefix each ABI understands, so an older kernel
+  returns a working ruleset rather than `E2BIG`.
+
+`sandbox_test` asserts `unixpath=denied` under enforcement and `unixpath=ok` with the sandbox off,
+so the denial cannot be a probe that merely failed to run.
+
+**What is still open, and accepted:** `SCM_RIGHTS`. A process already compromised on this machine can
+pass an open descriptor to the engine over a socket the engine already holds, and the filter never
+sees it. That is outside the threat model — anything already running as your user is — and it is
+recorded in `docs/security.md` rather than closed here.
+
+**This needs Landlock ABI 9.** See "Fail closed" for what is reported below that.
+
 ### Explicitly **not** denied, with the reason
 
 | Syscall | Why it stays |
 |---|---|
 | `execve`, `execveat` | **the filter is installed before `execv`** — denying them would kill the engine at launch. Landlock controls *what* can be executed; seccomp must not control *whether*. |
-| `connect`, `bind`, `listen`, `accept4`, `sendto`, `sendmsg`, `recvmsg`, `setsockopt` | reachable only with a socket fd, and the only obtainable fd is `AF_UNIX`. CUDA's local IPC needs all of them. Denying `connect` outright would break `nvidia-persistenced`/MPS paths that may exist on another box. |
+| `connect`, `bind`, `listen`, `accept4`, `sendto`, `sendmsg`, `recvmsg`, `setsockopt` | reachable only with a socket fd, and the only obtainable fd is `AF_UNIX`. CUDA's local IPC needs all of them, so they stay permitted at the syscall level and Landlock removes the destinations instead (below). Denying `connect` outright would break `nvidia-persistenced`/MPS paths that may exist on another box. |
 | `ioctl` | the entire NVIDIA driver interface. Cannot be denied; cannot be meaningfully argument-filtered either, because the NVIDIA request codes are undocumented and their payloads are pointers. See `security.md`. |
 | `mprotect` with `PROT_EXEC`, `memfd_create` | CUDA JITs PTX at runtime, so executable pages are required. Denying `memfd_create` alone would be theatre while `mprotect` must stay open. |
 | `clone`, `clone3` | threads. `clone3` passes its flags in a **pointer** struct, so `CLONE_NEWUSER` cannot be denied through it, and denying it via `clone`'s scalar `arg0` would be an incomplete control that reads as a complete one. So the nested namespace is reachable and is **not** prevented. What makes it harmless is that everything it could be used *for* is dead: the independent review showed that `clone3(CLONE_NEWUSER\|CLONE_NEWNS)` grants `CAP_SYS_ADMIN` over the new mount namespace, and that the whole new mount API (`fsopen`, `fsconfig`, `fsmount`, `fspick`, `move_mount`, `open_tree`, `mount_setattr`) was reachable. It is now on the kill list below, together with `chroot`. An earlier version of this table claimed "a nested user namespace grants no capability" — that was wrong, and the test now asserts `fsopen` dies. |
@@ -452,11 +490,25 @@ Two states only, never three:
 
 - **Enforced** (default). If `sandbox_available()` says the mechanisms are absent, or `sandbox_plan`
   cannot resolve a `--sandbox-allow-*` path, or `sandbox_apply` fails at any stage, the server
-  **exits non-zero before the engine serves anything**. No warning-and-continue. The one documented
-  degradation inside the enforced state is a Landlock ABI older than this build knows: unsupported
-  *rights* are masked out of the handled set and each one is logged by name. That is sound because
-  the rights the canary test depends on (`READ_FILE`, `READ_DIR`, `WRITE_FILE`, `EXECUTE`) are ABI 1
-  and exist wherever Landlock exists — so the downgrade can never weaken what the test asserts.
+  **exits non-zero before the engine serves anything**. No warning-and-continue.
+
+  Inside the enforced state, a Landlock ABI older than this build knows is a degradation rather than
+  a failure: unsupported *rights* are masked out of the handled set. The rights the canary test
+  depends on (`READ_FILE`, `READ_DIR`, `WRITE_FILE`, `EXECUTE`) are ABI 1 and exist wherever
+  Landlock exists, so **the file-access half of the sandbox is never weakened** by the downgrade.
+  Two rights above ABI 1 are load-bearing, and they are the exception that must be read carefully:
+  `LANDLOCK_ACCESS_FS_RESOLVE_UNIX` is **ABI 9** and `LANDLOCK_SCOPE_SIGNAL` is **ABI 6**. Below
+  those, the AF_UNIX path closure and the signal scope are simply absent. Because that is a security
+  control going quiet, it is reported and not inferred: the startup line reads `ENFORCED WITHOUT THE
+  AF_UNIX PATH CLOSURE (landlock abi < 9)`, `/health` and `/props` report
+  `enforced-no-unix-path` rather than `enforced`, and `sandbox_test` prints a `skip:` line naming
+  the missing right instead of asserting a denial the kernel cannot give.
+
+  **The kernel floor, stated plainly:** full enforcement as described in this document needs
+  **Landlock ABI 9 or newer**. ABI 6–8 gets everything except the AF_UNIX path closure; ABI 1–5 also
+  loses the signal scope. The server still runs — the escape below was open on every kernel before
+  this closure existed, so refusing to start would remove a configuration that works today — but it
+  says which of the two it is.
   Losing the netns because unprivileged user namespaces are disabled is also inside the enforced
   state, because seccomp still denies every internet socket; it is logged as
   `sandbox: unshare: <strerror>; egress is denied by the syscall filter only`, and the startup line
@@ -550,13 +602,31 @@ sandbox: landlock abi 10, 30 paths, network namespace, seccomp (75 instructions)
 probe: inet=denied inet6=denied netlink=denied unix=ok
 canary=denied model=ok procself=ok proc_meminfo=ok proc_other=denied
 ifaces=1
+unixpath=denied signal=denied
 probe: ptrace=killed
 probe: io_uring=killed
+probe: open_tree      killed
+probe: move_mount     killed
+probe: fsopen         killed
+probe: fsconfig       killed
+probe: fsmount        killed
+probe: fspick         killed
+probe: mount_setattr  killed
+filter: 75 instructions
 probe(off): inet=ok inet6=ok netlink=ok unix=ok
 canary=ok model=ok procself=ok proc_meminfo=ok proc_other=ok
-ifaces=6
-sandbox_test: 52 assertions passed
+ifaces=<the host's interface count>
+unixpath=ok signal=ok
+probe(off): ptrace=ran
+probe(off): io_uring=ran
+probe(off): mount_api=ran
+sandbox_test: 59 assertions passed
 ```
+
+The `probe(off)` lines are the inversion, and they are the point: every `denied` above is paired with
+an `ok` from the same probe with the sandbox off, so a `denied` cannot be a probe that simply failed
+to run. `ifaces` in that arm is the host's live interface count and changes between boots, so it is
+the one number here that can never be quoted.
 
 So on this kernel, measured and not argued: the user namespace and network namespace install
 unprivileged (`ifaces=1`, only `lo`), Landlock ABI 10 accepts the 30-entry allowlist, the canary

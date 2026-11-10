@@ -18,6 +18,7 @@
 #include "server-stream.h"
 
 #include <atomic>
+#include <cerrno>
 #include <clocale>
 #include <csignal>
 #include <cstdlib>
@@ -30,6 +31,11 @@
 #include <unistd.h>
 
 namespace {
+
+// --engine-timeout's ceiling: a day. Well above any legitimate silence (a maximal 32,768-token prompt reads in
+// about 13 s) and far below the point where the milliseconds arithmetic could overflow, so a value that parses
+// is a value that works. Anything larger is a usage error rather than a silently disabled bound.
+constexpr long ENGINE_TIMEOUT_MAX_S = 86400;
 
 std::function<void(int)> shutdown_handler;
 std::atomic_flag is_terminating = ATOMIC_FLAG_INIT;
@@ -58,6 +64,14 @@ void usage() {
         "                         sizes its expert cache only if the encoder loads first; for cards with room\n"
         "  --picture-cache N      keep the encoded rows of the last N pictures (default 64, up to 1 GiB) so a chat\n"
         "                         that resends its pictures every turn encodes each once; 0 turns it off\n"
+        "  --engine-timeout N     give up on a request after N seconds with no output at all from the engine\n"
+        "                         (default 120, max 86400). A wedged engine would otherwise hang the request for\n"
+        "                         ever; the server ends non-zero instead, so a unit with Restart=on-failure\n"
+        "                         restarts both. 0 waits for ever.\n"
+        "                         Do not set this below about 15: reading a long prompt is silent, and a maximal\n"
+        "                         32,768-token prompt is about 13 s of silence, so a smaller value kills healthy\n"
+        "                         requests. It bounds silence, not total time -- a slow engine that keeps\n"
+        "                         producing tokens is never cut off\n"
         "  --sandbox-allow-read PATH   also let the engine read this path (repeatable). The engine's own\n"
         "                         arguments that name an existing path are allowed automatically\n"
         "  --sandbox-allow-write PATH  also let it write there (repeatable): --expert-profile-save,\n"
@@ -102,6 +116,7 @@ int main(int argc, char ** argv) {
     std::vector<char *> llama_argv;
     bool mmproj_gpu = false; // the vision encoder on the card: only where the engine leaves room (a 48 GB card)
     long picture_cache = 64; // --picture-cache N: encoded pictures kept for the turns that resend them
+    long engine_timeout = -1; // --engine-timeout N: seconds of engine silence a request tolerates (-1: the default)
     bool sandbox = true;     // the engine child is contained unless --no-sandbox
     std::vector<std::string> sandbox_read, sandbox_write;
     llama_argv.push_back(argv[0]);
@@ -130,6 +145,28 @@ int main(int argc, char ** argv) {
             if (i + 1 >= argc) { usage(); return 2; }
             picture_cache = std::strtol(argv[++i], nullptr, 10);
             if (picture_cache < 0) { usage(); return 2; }
+            continue;
+        }
+        if (a == "--engine-timeout") {
+            if (i + 1 >= argc) { usage(); return 2; }
+            // Parsed strictly, because this is a safety bound and every loose reading of it fails OPEN -- the
+            // request hangs for ever, which is the exact behaviour the flag exists to remove. A bare strtol
+            // accepted `abc` and `` as 0 (= no bound), let `30s` through as 30, and let a value past INT_MAX
+            // narrow to a negative one that `seconds > 0` then read as "disabled": `4294968` became a 0.7 s
+            // bound and `2147484` became no bound at all. All of those are now usage errors.
+            const char* arg = argv[++i];
+            char*       end = nullptr;
+            errno = 0;
+            const long v = std::strtol(arg, &end, 10);
+            const bool ok = arg[0] != '\0' && end != nullptr && *end == '\0' && errno == 0 &&
+                            v >= 0 && v <= ENGINE_TIMEOUT_MAX_S;
+            if (!ok) {
+                std::fprintf(stderr,
+                    "aegis: --engine-timeout wants whole seconds, 0 to %ld (0 waits for ever); got \"%s\"\n",
+                    (long) ENGINE_TIMEOUT_MAX_S, arg);
+                return 2;
+            }
+            engine_timeout = v;
             continue;
         }
         if (a == "--no-sandbox") {
@@ -187,6 +224,9 @@ int main(int argc, char ** argv) {
 
     strata_context ctx_server;
     ctx_server.set_picture_cache((size_t) picture_cache, (size_t) 1 << 30);
+    if (engine_timeout >= 0) {
+        ctx_server.set_engine_timeout((int) engine_timeout);
+    }
     ctx_server.set_sandbox(sandbox, sandbox_read, sandbox_write);
     if (!sandbox) {
         // stderr and not LOG_WRN on purpose: a log level must not be able to suppress this, and it is a
@@ -241,7 +281,10 @@ int main(int argc, char ** argv) {
     SRV_INF("listening on %s, context %lld tokens\n", ctx_http.listening_address.c_str(), ctx_server.n_ctx());
 
     shutdown_handler = [&](int) {
-        ctx_server.terminate();
+        // request_stop(), not terminate(): see strata_context.hpp. terminate() tears down the result queue, and a
+        // reader parked in it is std::terminate()d -- so a signal arriving while a request was generating aborted
+        // this process with exit 134 and a core dump. Measured on the real model, both signals, before this.
+        ctx_server.request_stop();
     };
     struct sigaction sigint_action;
     sigint_action.sa_handler = signal_handler;
@@ -259,6 +302,12 @@ int main(int argc, char ** argv) {
         std::string why;
         while (!stop_supervisor) {
             if (ctx_server.engine_exited(why)) {
+                // A shutdown quits the engine on purpose (strata_context::terminate), so seeing it gone while one
+                // is under way is not a failure. Reporting it as one made an ordinary `systemctl stop` exit 1,
+                // which with Restart=on-failure starts the pair straight back up.
+                if (is_terminating.test()) {
+                    return;
+                }
                 SRV_ERR("%s; shutting down so the service manager can restart\n", why.c_str());
                 engine_died = true;
                 ctx_server.terminate();
@@ -270,11 +319,25 @@ int main(int argc, char ** argv) {
 
     ctx_server.start_loop(); // blocks until terminate()
 
+    // engine_failed(), not engine_alive(): terminate() quits the engine on purpose, so by the time the loop
+    // returns the engine is always gone and `alive` would report failure for an ordinary `systemctl stop` --
+    // which, with Restart=on-failure, is a restart loop. This flag is set only when the engine closed its output
+    // or went silent past --engine-timeout, which is what the non-zero code below is for.
+    const bool engine_lost = ctx_server.engine_failed();
+
+    // The task loop has returned, so nothing else touches the slot: this is the one safe place to answer a request
+    // that was still generating when we were asked to stop. Its HTTP handler is parked in the result queue, and
+    // clean_up() below tears that queue down -- which used to abort the process (exit 134, core dumped) because
+    // llama.cpp's server-queue std::terminate()s a parked reader rather than returning to HTTP code.
+    if (ctx_server.fail_inflight("the server is shutting down")) {
+        SRV_INF("%s", "answered the request that was still running, then stopping\n");
+    }
+
     stop_supervisor = true;
     supervisor.join();
     clean_up();
     if (ctx_http.thread.joinable()) {
         ctx_http.thread.join();
     }
-    return engine_died ? 1 : 0;
+    return (engine_died || engine_lost) ? 1 : 0;
 }

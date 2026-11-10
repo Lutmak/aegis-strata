@@ -478,10 +478,24 @@ keys — were fixed and are covered by tests; the rest are recorded here rather 
 of them is reachable without either an operator-supplied file or a client that is already trusted to
 send requests.
 
-- **There is no engine timeout, so a wedged engine blocks the server until it is restarted.**
-  Reproduced with a stand-in engine that reads `GEN` and then goes silent: the request hangs, and
-  after the client gives up `/health` still reports `busy`. The supervisor only watches for the
-  engine *exiting*. A per-request idle watchdog plus a hard deadline after `STOP` is the fix.
+A third, the missing engine timeout, was fixed afterwards and is covered by a test; it is kept below
+with that marked, because the reasoning is what justifies the shape of the fix.
+
+- ~~**There is no engine timeout, so a wedged engine blocks the server until it is restarted.**~~
+  **Fixed.** Reproduced with a stand-in engine that reads `GEN` and then goes silent: the request
+  hung, and after the client gave up `/health` still reported `"status":"ok"` with `busy`. The
+  supervisor only watches for the engine *exiting*, which a wedged engine never does.
+  `--engine-timeout` now bounds how long a running request tolerates total silence from the engine
+  (`server/strata_context.cpp#give_up_on_a_silent_engine`, default 120 s, `0` waits for ever).
+  **Bounded for a request already sent to the engine**, which is narrower than "fixed": the clock
+  starts after the request has been written, so tokenization, template rendering and the picture-file
+  write are outside it, as is the server's own blocking write to an engine that has stopped reading
+  its input. It also bounds *silence*, not progress — an engine that keeps emitting any line holds
+  the slot. The
+  request gets a 503 and the server then ends non-zero, as it already did when the engine exited,
+  because it deliberately does not fork a replacement engine out of a process that already has
+  threads and every later request would wedge the same way. Covered by `server/tests/e2e.sh` with
+  the stand-in engine's `FAKE_WEDGE`, so it needs no GPU.
 - **The engine child inherits the server's environment**, because `server/engine.hpp` uses `execv`.
   llama.cpp's own argument code reads `LLAMA_API_KEY` from the environment, so code running inside a
   compromised engine can read the operator's API key out of `/proc/self/environ`. `LD_PRELOAD` and
@@ -506,9 +520,24 @@ send requests.
   thread pool. A body of 8 MB is tokenized in full before the context check rejects it. Request
   nesting beyond ~200,000 levels overflows the stack. The server serves one request at a time on
   loopback, which is what keeps these mild.
-- **Shutdown is untidy**: `SIGTERM` and `SIGINT` both exit 1, so a service manager counts a clean stop
-  as a failure, and every run leaves its `mkdtemp` directory behind (121 were found on the reference
-  machine).
+- ~~**`SIGTERM` and `SIGINT` both exit 1, so a service manager counts a clean stop as a failure.**~~
+  **Fixed**, and it was worse than this bullet said. A deliberate stop while the server was *idle*
+  exited 1 because the supervisor saw the engine it had itself quit and reported a crash; a stop
+  while a request was *generating* was worse still, aborting the process with exit 134 and a core
+  dump, because the request's own HTTP handler was parked in llama.cpp's result queue and that queue
+  calls `std::terminate()` on a parked reader rather than returning to HTTP code. With the
+  `Restart=on-failure` this project recommends, either outcome restarted the pair it had just been
+  told to stop. Both now exit 0: the signal handler asks the task loop to return and does nothing
+  else, the in-flight request is answered on the main thread once that loop has stopped, and
+  `server/tests/e2e.sh` asserts exit 0 for both signals both idle and mid-generation.
+- **Every run leaves its `mkdtemp` directory behind** (121 were found on the reference machine).
+- **An engine-side exception message reaches the HTTP client verbatim.** The engine prints
+  `ERR <text>` on its protocol and the server forwards it as a 500 body, so a `std::filesystem`
+  error or a GGUF/pack parse failure can put **absolute host paths** in the response. The client is
+  same-uid on loopback and can read those paths directly, so this is informational rather than a
+  boundary crossing, but it is a wider class than it was: before, only the server's own errors could
+  do this, and now any exception anywhere in the engine can. Nothing echoes request content, because
+  the only things the server writes to the engine are numeric sampling values and token ids.
 - **Malformed JSON generally returns 500 rather than 400**, and `/detokenize` leaks
   `vector::_M_range_check` text on an out-of-range id.
 
