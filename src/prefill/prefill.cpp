@@ -88,6 +88,8 @@ bool tab_built() { return false; }
 bool tab_fits(int, int64_t) { return false; }
 size_t overread_bytes(int, int64_t) { return 0; }
 bool whole_tiles(int, int64_t, int) { return false; }
+// true = "cannot be predicted, do not replace this launch": the honest answer when there is no MMQ at all.
+bool launch_splits_k(int, int64_t, int64_t, int) { return true; }
 int direct_mode() { return 0; }
 size_t direct_slot_guard() { return 0; }
 void prep_group(const GuardTab&, size_t, void*, void*, size_t, void*) {}

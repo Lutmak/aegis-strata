@@ -551,10 +551,17 @@ bool whole_tiles(int t, int64_t w_rows, int n_experts) {
 }
 
 bool launch_splits_k(int t, int64_t w_rows, int64_t max_rows, int n_experts) {
-    if (!supported(t) || w_rows <= 0 || max_rows <= 0 || n_experts <= 0) return false;
+    // `false` here is permission: it tells the caller MMQ would compute this launch in one block per tile, so a
+    // kernel of its own may replace it.  Every answer this function cannot actually predict must therefore be `true`,
+    // which only costs the caller the kernel.  It used to return `false` for an unsupported type and for a
+    // non-positive shape -- granting permission for exactly the launches it knows nothing about.
+    if (!supported(t) || w_rows <= 0 || max_rows <= 0 || n_experts <= 0) return true;
     const ggml_cuda_device_info& info = ggml_cuda_info();
     int id = 0;
-    cudaGetDevice(&id);
+    // Unchecked, a failed cudaGetDevice left id at 0, which is in range whenever a device exists -- so "the device
+    // cannot be read" answered for device 0 instead of declining, and on a second GPU that answer can be wrong in
+    // the permissive direction.  fits() and whole_tiles() below loop over every visible device for the same reason.
+    if (cudaGetDevice(&id) != cudaSuccess) { cudaGetLastError(); return true; }
     if (id < 0 || id >= info.device_count) return true;
     const int cc = info.devices[id].cc, nsm = info.devices[id].nsm;
     const size_t smpbo = info.devices[id].smpbo;

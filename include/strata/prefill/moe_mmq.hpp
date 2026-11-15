@@ -158,7 +158,13 @@ bool whole_tiles(int ggml_type, int64_t w_rows, int n_experts);
 /// Whether `Context::run` on the current device would split a product's K across blocks with llama.cpp's stream-k
 /// decomposition (its fixup adds the partial sums in another order), for `n_experts` experts of [w_rows, *] weights of
 /// `ggml_type` and at most `max_rows` rows an expert: the tile width mul_mat_q_switch_J picks, the config's stream_k
-/// flag, and launch_mul_mat_q's tile-efficiency test.  False for a type MMQ does not cover.  (STRATA_IQ4_W4A8.)
+/// flag, and launch_mul_mat_q's tile-efficiency test.  (STRATA_IQ4_W4A8.)
+///
+/// `true` whenever the answer cannot be predicted -- a type MMQ does not cover, a non-positive shape, a device that
+/// cannot be read, no tile that fits, a non-NVIDIA backend.  `false` is permission for a caller to replace the
+/// launch, so an unpredictable case must never return it.  It assumes what `Context::run` passes today:
+/// `ncols_opt == ncols_max == max_rows`, `nchannels_y == n_experts`, `nsamples_y == 1`, and a `fallback` of false
+/// (which holds because its only caller requires `w_rows % 128 == 0` first).
 bool launch_splits_k(int ggml_type, int64_t w_rows, int64_t max_rows, int n_experts);
 /// STRATA_MMQ_DIRECT, read once: 0 (default) today's gather; 1 the guard layout and resident experts read in
 /// place; 2 the guard layout with today's gather (the bitwise A/B reference).  0 whenever !tab_built().
