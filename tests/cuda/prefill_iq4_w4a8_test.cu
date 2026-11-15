@@ -282,13 +282,31 @@ Result run_case(int64_t T, double sigma, bool tab, int wide, bool bench) {
 }  // namespace
 
 int main(int argc, char** argv) {
+    // FIRST: clear the variables the code under test reads, so the result describes the shipped configuration and not
+    // the operator's shell.  STRATA_W4A8_CFG picks among four tile widths; with it exported this test silently compared
+    // a configuration the engine does not use, and said "all identical" without naming which one. (nv_defaults_test
+    // carries the same comment for the same reason.)  STRATA_IQ4_W4A8 is cleared too: the test calls run_iq4_w4a8
+    // directly, so the switch is irrelevant to it, and leaving it set only prints a misleading banner.
+    unsetenv("STRATA_W4A8_CFG");
+    unsetenv("STRATA_IQ4_W4A8");
+
     bool full = false, wide = false, bench = false;
+    int cfg = -1;   // --cfg N: check one of the other tile widths instead of the shipped default
     int64_t tokens = 0;   // --tokens N: the layer-chunk's tokens (a tail: 97, 2049, 8191 ...)
     for (int i = 1; i < argc; ++i) {
         if (std::strcmp(argv[i], "--full") == 0) full = true;
         else if (std::strcmp(argv[i], "--wide") == 0) wide = true;
         else if (std::strcmp(argv[i], "--bench") == 0) bench = true;
         else if (std::strcmp(argv[i], "--tokens") == 0 && i + 1 < argc) tokens = std::atoll(argv[++i]);
+        else if (std::strcmp(argv[i], "--cfg") == 0 && i + 1 < argc) cfg = std::atoi(argv[++i]);
+    }
+    // cfg_index() latches on its first use, so this has to happen before any kernel call.  Without --cfg the test
+    // checks the configuration the engine ships (0); Cfg1..Cfg3 are selectable in production and differ in tile
+    // width, grid shape and shared memory, so they are worth being able to check at all.
+    if (cfg >= 0) {
+        if (cfg > 3) { std::printf("--cfg: 0..3\n"); return 2; }
+        char v[2] = {(char) ('0' + cfg), '\0'};
+        setenv("STRATA_W4A8_CFG", v, 1);
     }
     int ndev = 0;
     if (cudaGetDeviceCount(&ndev) != cudaSuccess || ndev == 0) {
@@ -298,7 +316,7 @@ int main(int argc, char** argv) {
     cudaDeviceProp prop{};
     ck(cudaGetDeviceProperties(&prop, 0), "device properties");
     const int cc = prop.major * 10 + prop.minor;
-    if ((cc < 80 || cc >= 89) && cc != 120) {
+    if (!mmq::w4a8_arch_ok(cc)) {
         std::printf("prefill_iq4_w4a8_test: %s is sm_%d; the kernel runs on sm_80..sm_88 and sm_120 only (MMQ elsewhere) - skipped\n",
                     prop.name, cc);
         return 77;
@@ -323,8 +341,17 @@ int main(int argc, char** argv) {
             ok = ok && pass;
         }
     }
+    // A kernel that declined everything would print "0 differ" on every case and pass, so "identical" has to mean
+    // "identical AND it ran".  The down products are the hard requirement.  Zero gate/up products is NOT a failure:
+    // on a card whose SM count makes MMQ stream-k split every such launch it is the designed outcome -- at 108 SMs
+    // (A100) the gate/up tiles fill 100*160/(108*2) = 74% of their waves and 160 % 108 != 0, so launch_splits_k
+    // declines all of them.  Failing there would report a supported card as broken.  The counts in the verdict line
+    // below are what makes a zero visible either way.
     if (tot_dn == 0) { std::printf("FAIL: the kernel ran no down product in any case\n"); ok = false; }
-    if (tot_gu == 0) std::printf("note: the kernel ran no gate/up product (MMQ would split every such launch along K here)\n");
-    std::printf("prefill_iq4_w4a8_test: %s on %s (sm_%d)\n", ok ? "all identical" : "DIFFERENCES", prop.name, cc);
+    if (tot_gu == 0) std::printf("note: the kernel ran no gate/up product (MMQ would split every such launch on this card)\n");
+    std::printf("prefill_iq4_w4a8_test: %s on %s (sm_%d), config %d; %lld gate/up and %lld down products through the "
+                "kernel, %lld and %lld through MMQ\n", ok ? "all identical" : "DIFFERENCES", prop.name, cc,
+                mmq::w4a8_config(), (long long) tot_gu, (long long) tot_dn, (long long) tot_mmq_gu,
+                (long long) tot_mmq_dn);
     return ok ? 0 : 1;
 }
