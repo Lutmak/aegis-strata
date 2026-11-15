@@ -20,10 +20,13 @@
 #include "strata/prefill/moe_iq4_w4a8.hpp"
 
 #if defined(GGML_USE_HIP)
-// The gfx906 HIP build compiles every CUDA source of the tree as HIP: this kernel is NVIDIA PTX (mma.sync, cp.async),
-// so there it declines every product and the MMQ path runs as before.
+// This kernel is NVIDIA PTX (mma.sync, cp.async).  CMakeLists.txt does not put this file in the HIP build's source
+// list at all, and moe_mmq.cu's call site is itself inside `#if !defined(GGML_USE_HIP)`, so these stubs are belt and
+// braces for a HIP build that did compile it: they decline every product and the MMQ path runs as before.
 namespace strata::prefill::mmq {
 int iq4_w4a8_mode() { return 0; }
+int w4a8_config() { return 0; }
+bool w4a8_arch_ok(int) { return false; }
 bool run_iq4_w4a8(const Product&, void*) { return false; }
 }  // namespace strata::prefill::mmq
 #else
@@ -65,13 +68,15 @@ struct Tab16 {
 };
 
 // cp.async and the m16n8k32 s8 MMA below are Ampere instructions (ptxas rejects them for sm_75), and this fork's
-// default build compiles for 75;86;89.  Below sm_80 the helpers and the kernel body are compiled out: no device of
-// that capability reaches them, because cover() declines unless device_info() reports cc 80..88 - the same gate that
-// makes the kernel an opt-in on the cards it was measured on.  (moe_fused.cu does this with a Turing fallback; there
-// is none here, so the kernel is simply absent from the sm_75 image.)
-#define STRATA_IQ4_W4A8_DEVICE (defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 800)
-
-#if STRATA_IQ4_W4A8_DEVICE
+// default build compiles for 75;86;89.  Below sm_80 the helpers and the kernel body are compiled out, so the sm_75
+// image holds a kernel of nothing but traps.  Two separate things keep a device away from it: run_iq4_w4a8's prelude
+// declines unless the card's capability is in arch_ok(), and device_info()'s image_ok() declines unless the image this
+// device actually loaded was built for sm_80 or above -- the capability and the image can disagree under PTX JIT.
+// (moe_fused.cu does the same with a Turing fallback; there is none here.)
+//
+// Written as a plain #if, not a macro: `defined` reached through a macro expansion is unspecified, and gcc says so
+// (-Wexpansion-to-defined), which was the only warning this file produced.
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 800
 __device__ __forceinline__ void cp8(uint32_t dst, const void* src) {
     asm volatile("cp.async.ca.shared.global [%0], [%1], 8;\n" ::"r"(dst), "l"(src));
 }
@@ -102,7 +107,7 @@ __device__ __forceinline__ void ldsm4(uint32_t& r0, uint32_t& r1, uint32_t& r2, 
 __device__ __forceinline__ void lds128(float4& v, uint32_t addr) {
     asm volatile("ld.shared.v4.f32 {%0, %1, %2, %3}, [%4];\n" : "=f"(v.x), "=f"(v.y), "=f"(v.z), "=f"(v.w) : "r"(addr));
 }
-#if STRATA_IQ4_W4A8_DEVICE
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 800
 template <uint32_t C0>
 __device__ __forceinline__ void mma_s8(int (&c)[4], const uint32_t (&a)[4], uint32_t b0, uint32_t b1) {
     asm("mma.sync.aligned.m16n8k32.row.col.s32.s8.s8.s32 {%0, %1, %2, %3}, {%4, %5, %6, %7}, {%8, %9}, "
@@ -382,29 +387,68 @@ int cfg_index() {
     return c;
 }
 
+// The compute capabilities upstream checked the kernel's bits against MMQ's on (their prefill_iq4_w4a8_test):
+// Ampere 8.0-8.8 and Blackwell 12.0; Ada (8.9) had no card to test on there, so it keeps MMQ.  In this fork the
+// parity test has run on one card, sm_86 -- the rest of that range is upstream's evidence, not ours.
+bool arch_ok(int cc) { return (cc >= 80 && cc < 89) || cc == 120; }
+
+// The shared-memory opt-in, checked.  Two of the four configs need more than the 48 KiB a block gets by default --
+// Cfg0 2 * (128*72 + 128*144) = 55,296 bytes and Cfg2 50,688 -- while Cfg1 (48,384) and Cfg3 (46,080) sit just under
+// it; the opt-in is requested for all four either way.  Dropping the status left a sticky CUDA error that the next
+// cudaGetLastError() on the MMQ fallback path reported as "prefill mmq: mul_mat_q: invalid argument" and exited --
+// the right fail direction with the wrong name on it.  false here means "this card cannot run the kernel".
 template <class C>
-void set_smem() {
-    cudaFuncSetAttribute(iq4_w4a8_kernel<true, C>, cudaFuncAttributeMaxDynamicSharedMemorySize, C::Smem);
-    cudaFuncSetAttribute(iq4_w4a8_kernel<false, C>, cudaFuncAttributeMaxDynamicSharedMemorySize, C::Smem);
+bool set_smem() {
+    return cudaFuncSetAttribute(iq4_w4a8_kernel<true, C>, cudaFuncAttributeMaxDynamicSharedMemorySize, C::Smem) == cudaSuccess &&
+           cudaFuncSetAttribute(iq4_w4a8_kernel<false, C>, cudaFuncAttributeMaxDynamicSharedMemorySize, C::Smem) == cudaSuccess;
 }
 
-// per device, once: SM count, compute capability, the configs' shared-memory opt-in (the engine drives both GPUs)
+// Whether the image this device actually loaded contains the kernel, as opposed to the __trap() stubs.
+//
+// arch_ok() reads the card's compute capability; the device code is gated on __CUDA_ARCH__, the capability nvcc
+// compiled for.  PTX JIT separates the two.  A build whose arch list stops below the card -- `make build
+// CUDA_ARCHS=75;86;89` on a cc 8.0 A100, which arch_ok admits and no cubin here covers -- has the driver JIT the
+// highest compute_XX it can, compute_75, whose kernel body is nothing but traps.  __trap() destroys the context, so
+// the engine died mid-prompt with whatever message the next ck() site happened to carry.  ptxVersion is the virtual
+// architecture of the loaded image, so this is the one question worth asking, and moe_fused.cu:653 asks it the same way.
+template <class C>
+bool image_ok() {
+    cudaFuncAttributes fa{};
+    const bool got = cudaFuncGetAttributes(&fa, iq4_w4a8_kernel<true, C>) == cudaSuccess;
+    cudaGetLastError();   // a missing image is an answer, not an error to carry forward
+    return got && fa.ptxVersion >= 80 && fa.binaryVersion >= 80;
+}
+
+// per device, once: SM count, compute capability, the image check and the shared-memory opt-in (the engine drives
+// both GPUs).  cc 0 means "do not use the kernel on this device", for any of the reasons above.
 int device_info(int& nsm) {
     constexpr int kMaxDev = 16;
     static std::once_flag once[kMaxDev];
     static int nsm_d[kMaxDev], cc_d[kMaxDev];
     int dev = 0;
-    cudaGetDevice(&dev);
+    if (cudaGetDevice(&dev) != cudaSuccess) { cudaGetLastError(); return 0; }
     if (dev < 0 || dev >= kMaxDev) return 0;
     std::call_once(once[dev], [dev] {
         cudaDeviceProp prop{};
-        cudaGetDeviceProperties(&prop, dev);
+        if (cudaGetDeviceProperties(&prop, dev) != cudaSuccess) {
+            cudaGetLastError();
+            cc_d[dev] = 0;
+            return;
+        }
         nsm_d[dev] = prop.multiProcessorCount;
-        cc_d[dev] = prop.major * 10 + prop.minor;
-        set_smem<Cfg0>();
-        set_smem<Cfg1>();
-        set_smem<Cfg2>();
-        set_smem<Cfg3>();
+        const int cc = prop.major * 10 + prop.minor;
+        // The opt-in and the image check only matter where the kernel would be used, and attempting them on a card
+        // that will decline anyway is how the sticky error above was produced.
+        if (!arch_ok(cc)) { cc_d[dev] = cc; return; }
+        const bool ok = set_smem<Cfg0>() && set_smem<Cfg1>() && set_smem<Cfg2>() && set_smem<Cfg3>() &&
+                        image_ok<Cfg0>() && image_ok<Cfg1>() && image_ok<Cfg2>() && image_ok<Cfg3>();
+        cudaGetLastError();
+        if (!ok)
+            std::fprintf(stderr, "strata: prompt experts: the IQ4 W4A8 kernel is not usable on this card (cc %d): its "
+                                 "device code is not in this binary's architecture list, or the card cannot give a "
+                                 "block %d bytes of shared memory. MMQ runs the IQ4 products instead.\n",
+                         cc, (int) Cfg0::Smem);
+        cc_d[dev] = ok ? cc : -1;   // -1: admitted by capability, unusable in this binary -- its own decline reason
     });
     nsm = nsm_d[dev];
     return cc_d[dev];
@@ -425,10 +469,6 @@ void launch(bool xs, const Tab16& tab, const Product& p, int64_t row_bytes, cuda
 
 }  // namespace
 
-// the compute capabilities the kernel's bits were checked against MMQ's on (prefill_iq4_w4a8_test): Ampere (8.0-8.8) and
-// Blackwell 12.0; Ada (8.9) has no card to test on, so it keeps MMQ
-static bool arch_ok(int cc) { return (cc >= 80 && cc < 89) || cc == 120; }
-
 void report_counts();
 int iq4_w4a8_mode() {
     static const int m = [] {
@@ -444,34 +484,61 @@ int iq4_w4a8_mode() {
     return m;
 }
 
-// dispatch counters (the path ran / why it declined), printed once at exit when the kernel is on
-std::atomic<long long> g_ran[2], g_declined[6];   // ran: [IQ4_XS, IQ4_NL]; declined: shape, scales, arch, splits-K, alignment, type
-const char* const kWhy[6] = {"shape", "NVFP4 scales", "architecture", "MMQ would split K", "alignment", "other type"};
+// Dispatch counters (the path ran / why it declined), printed once at exit when the kernel is on.
+//
+// The reasons are split into two groups because an operator could not previously tell "this product is not mine, as
+// designed" from "something about this machine is wrong and the kernel has been off ever since": both arrived as one
+// "architecture" or "shape" count.  Everything from kFirstProblem on is a problem, and the exit line says so.
+enum Why { kWhyType = 0, kWhyShape, kWhySplitK, kWhyScales, kFirstProblem, kWhyNoImage = kFirstProblem, kWhyArch,
+           kWhyAlignment, kWhyGroupTooBig, kWhyCount };
+std::atomic<long long> g_ran[2], g_declined[kWhyCount];   // ran: [IQ4_XS, IQ4_NL]
+const char* const kWhy[kWhyCount] = {"not an IQ4 product", "matrix shape", "MMQ would split K", "NVFP4 scales",
+                                     "no device image", "card not covered", "misaligned buffer", "group too big"};
 void report_counts() {
-    std::fprintf(stderr, "strata: IQ4 W4A8 kernel: ran %lld IQ4_XS and %lld IQ4_NL products; declined", g_ran[0].load(), g_ran[1].load());
-    for (int i = 0; i < 6; ++i) std::fprintf(stderr, " %s %lld%s", kWhy[i], g_declined[i].load(), i < 5 ? "," : "");
-    std::fprintf(stderr, " (MMQ ran those)\n");
+    std::fprintf(stderr, "strata: IQ4 W4A8 kernel: ran %lld IQ4_XS and %lld IQ4_NL products; left to MMQ:",
+                 g_ran[0].load(), g_ran[1].load());
+    for (int i = 0; i < kFirstProblem; ++i) std::fprintf(stderr, " %s %lld%s", kWhy[i], g_declined[i].load(), i < kFirstProblem - 1 ? "," : "");
+    long long problems = 0;
+    for (int i = kFirstProblem; i < kWhyCount; ++i) problems += g_declined[i].load();
+    if (problems == 0) {
+        std::fprintf(stderr, "; nothing was refused for a reason that looks like a fault\n");
+        return;
+    }
+    std::fprintf(stderr, "; REFUSED for a reason worth looking at:");
+    for (int i = kFirstProblem; i < kWhyCount; ++i)
+        if (g_declined[i].load() != 0) std::fprintf(stderr, " %s %lld", kWhy[i], g_declined[i].load());
+    std::fprintf(stderr, "\n");
 }
-bool decline(int why) { g_declined[why].fetch_add(1, std::memory_order_relaxed); return false; }
+// `why` is an enumerator at every call site; the bound keeps a future reason from writing past the arrays.
+bool decline(int why) {
+    if (why >= 0 && why < kWhyCount) g_declined[why].fetch_add(1, std::memory_order_relaxed);
+    return false;
+}
+
+int w4a8_config() { return cfg_index(); }
+bool w4a8_arch_ok(int cc) { return arch_ok(cc); }
 
 bool run_iq4_w4a8(const Product& p, void* stream) {
     const bool xs = p.type == GGML_TYPE_IQ4_XS;
-    if (!xs && p.type != GGML_TYPE_IQ4_NL) return decline(5);
-    if (p.n <= 0 || p.n > kGatherGroupMax || p.max_rows <= 0) return decline(0);
-    if (p.w_rows % kBM != 0 || p.w_cols % (xs ? 256 : 128) != 0) return decline(0);
-    if (p.y_scale != nullptr) return decline(1);   // (NVFP4 w4a4 scales: not an IQ4 product)
+    if (!xs && p.type != GGML_TYPE_IQ4_NL) return decline(kWhyType);
+    if (p.n <= 0 || p.max_rows <= 0) return decline(kWhyShape);
+    if (p.n > kGatherGroupMax) return decline(kWhyGroupTooBig);   // a group wider than the pointer table: not routine
+    // w_rows <= 0 passed `% kBM != 0` (0 % 128 == 0) and gave a zero-block grid, i.e. exit(1) from ck() rather than a decline.
+    if (p.w_rows <= 0 || p.w_rows % kBM != 0 || p.w_cols % (xs ? 256 : 128) != 0) return decline(kWhyShape);
+    if (p.y_scale != nullptr) return decline(kWhyScales);   // (NVFP4 w4a4 scales: not an IQ4 product)
     int nsm = 0;
     const int cc = device_info(nsm);
-    if (!arch_ok(cc)) return decline(2);
-    if (launch_splits_k(p.type, p.w_rows, p.max_rows, p.n)) return decline(3);   // MMQ's stream-k fixup adds the sums in another order
+    if (cc == -1) return decline(kWhyNoImage);   // admitted by capability, but this binary has no usable image
+    if (!arch_ok(cc)) return decline(kWhyArch);
+    if (launch_splits_k(p.type, p.w_rows, p.max_rows, p.n)) return decline(kWhySplitK);   // MMQ's fixup adds the sums in another order
     const int64_t row_bytes = p.w_cols / (xs ? 256 : 32) * (xs ? 136 : 18);
     Tab16 tab{};
     for (int z = 0; z < p.n; ++z) {
         tab.p[z] = p.tab ? (const char*) p.tab->p[z] : (const char*) p.w + (size_t) z * p.expert_bytes;
-        if (((uintptr_t) tab.p[z] & 7) != 0) return decline(4);   // 8-byte cp.async pieces
+        if (((uintptr_t) tab.p[z] & 7) != 0) return decline(kWhyAlignment);   // 8-byte cp.async pieces
     }
     for (int z = p.n; z < kGatherGroupMax; ++z) tab.p[z] = tab.p[0];
-    if ((((uintptr_t) p.xq) & 15) != 0) return decline(4);
+    if ((((uintptr_t) p.xq) & 15) != 0) return decline(kWhyAlignment);   // 16-byte cp.async pieces
     const cudaStream_t s = (cudaStream_t) stream;
     switch (cfg_index()) {
         case 1: launch<Cfg1>(xs, tab, p, row_bytes, s); break;
@@ -479,7 +546,7 @@ bool run_iq4_w4a8(const Product& p, void* stream) {
         case 3: launch<Cfg3>(xs, tab, p, row_bytes, s); break;
         default: launch<Cfg0>(xs, tab, p, row_bytes, s); break;
     }
-    g_ran[xs ? 0 : 1].fetch_add(1, std::memory_order_relaxed);
+    g_ran[xs ? 0 : 1].fetch_add(1, std::memory_order_relaxed);   // issued; the caller's ck() reports a launch error
     return true;
 }
 

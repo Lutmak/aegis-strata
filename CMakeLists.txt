@@ -1642,7 +1642,8 @@ if(STRATA_NATIVE_EXPERTS)
     endif()
     if(STRATA_BUILD_TESTS)
       # STRATA_IQ4_W4A8: the IQ4 W4A8 expert kernel against MMQ, bit for bit, on the group buffers and (with
-      # STRATA_MMQ_TAB) the pointer table (exit 77 without a card or off sm_80..sm_88)
+      # STRATA_MMQ_TAB, off by default, so normally not that arm) the pointer table. Exit 77 = skipped: no card, or a
+      # card mmq::w4a8_arch_ok() does not accept -- the test asks that function rather than restating the rule.
       add_executable(prefill_iq4_w4a8_test tests/cuda/prefill_iq4_w4a8_test.cu)
       target_link_libraries(prefill_iq4_w4a8_test PRIVATE strata_mmq ggml-base ${_strata_gpu_runtime_target})
       add_test(NAME prefill_iq4_w4a8_test COMMAND prefill_iq4_w4a8_test)

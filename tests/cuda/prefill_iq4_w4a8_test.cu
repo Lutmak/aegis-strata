@@ -308,12 +308,12 @@ int main(int argc, char** argv) {
     if (mmq::tab_fits(GGML_TYPE_IQ4_XS, 1280) && mmq::tab_fits(GGML_TYPE_IQ4_NL, 2560)) layouts.push_back(true);
     else std::printf("(this build has no pointer-table MMQ: the group-buffer layout only)\n");
     bool ok = true;
-    int64_t tot_gu = 0, tot_dn = 0;
+    int64_t tot_gu = 0, tot_dn = 0, tot_mmq_gu = 0, tot_mmq_dn = 0;
     for (double sigma : {0.0, 1.0, 2.0}) {
         for (bool tab : layouts) {
             const Result r = run_case(T, sigma, tab, wide ? 1 : 0, bench);
             const bool pass = r.differ == 0 && r.unwritten == 0;   // (coverage is checked over the whole run below: a launch MMQ would split along K stays on MMQ)
-            tot_gu += r.new_gu; tot_dn += r.new_dn;
+            tot_gu += r.new_gu; tot_dn += r.new_dn; tot_mmq_gu += r.mmq_gu; tot_mmq_dn += r.mmq_dn;
             if (bench) std::printf("  bench: gate/up MMQ %.3f ms, kernel %.3f ms (%+.1f%%); down MMQ %.3f ms, kernel %.3f ms (%+.1f%%)\n", r.ms_gu[0], r.ms_gu[1], 100.0 * (r.ms_gu[0] / r.ms_gu[1] - 1), r.ms_dn[0], r.ms_dn[1], 100.0 * (r.ms_dn[0] / r.ms_dn[1] - 1));
             std::printf("%s: %lld tokens%s, routing %s, %s: %zu words, %zu differ, %zu unwritten; kernel %lld + %lld products, "
                         "MMQ %lld + %lld (gate/up + down)\n", pass ? "PASS" : "FAIL", (long long) T, wide ? " (wide scales)" : "",
