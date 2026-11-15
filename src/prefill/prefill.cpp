@@ -38,8 +38,7 @@
 #include "strata/prefill/gemm.hpp"
 #include "strata/prefill/moe_fused.hpp"
 #include "strata/prefill/moe_fused_iq.hpp"
-#include "strata/prefill/moe_mmq.hpp"
-#include "strata/prefill/mmq_ids_margin.hpp"
+#include "strata/prefill/moe_mmq.hpp"   // and, through it, prefill/mmq_ids_margin.hpp
 #include "strata/core/peer_experts.hpp"
 #include "strata/prefill/kernels.hpp"
 
@@ -1869,8 +1868,11 @@ bool Prefill::bind_stage_helper(int64_t T) {
             return false;
     }
     const core::OnDevice on(P.dev);
-    // the helper's row table (h.T >= T): a refill may have overwritten its slots
-    mmq::iota(P.ident, (int64_t) mmq_ids_rows((size_t) T), P.s);
+    // the helper's row table (h.T >= T): a refill may have overwritten its slots, so this write must happen -- a
+    // zero length would leave the table holding whatever the experts left behind, and route rows to nowhere
+    const size_t helper_rows = mmq_ids_rows((size_t) T);
+    if (helper_rows == 0) return false;
+    mmq::iota(P.ident, (int64_t) helper_rows, P.s);
     return true;
 }
 
@@ -2221,6 +2223,13 @@ uint64_t Prefill::bytes_needed_impl(const core::ModelGeometry& g, const core::Se
     f((size_t) strata::kernels::NG_HC_DIM);
     strata::kernels::KvHostPools stage;
     take_stage(o, ss, s, stage, ok);
+    // `ok` is otherwise write-only here: in count-only mode Alloc::take returns before it can clear it, and this
+    // function used to end by returning the total whatever happened.  So an `ok = false` set above -- the only one
+    // that can happen is a chunk whose row table cannot be sized -- reported a size as if it were satisfiable, and
+    // the caller's search would then pick that chunk.  UINT64_MAX is the honest answer: no card can hold it, so the
+    // search shrinks the chunk instead.  (Reachable only above T = INT64_MAX / 10, far past any chunk cap; the point
+    // is that the guard above now means something.)
+    if (!ok) return UINT64_MAX;
     return o.used + (8u << 20);   // alignment slack
 }
 
@@ -2472,7 +2481,11 @@ bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::stri
     const cudaStream_t cs = (cudaStream_t) m.cs;
     // the MMQ row table lives in the borrowed cache slots, which the refill after a prompt overwrites with experts:
     // write it again for every prompt (a layout is reused as long as the chunk and the slots are the same)
-    if (m.ids_identity != nullptr) mmq::iota(m.ids_identity, (int64_t) mmq_ids_rows((size_t) m.T), m.cs);
+    if (m.ids_identity != nullptr) {
+        const size_t ids_rows = mmq_ids_rows((size_t) m.T);   // the same size carve used, so 0 is unreachable here
+        if (ids_rows == 0) { err = "the MMQ row table cannot be sized for this chunk"; return false; }
+        mmq::iota(m.ids_identity, (int64_t) ids_rows, m.cs);
+    }
     // The PLE rows of a chunk are read from the model file on the host (an SSD read per missed row): the chunk
     // after this one is read on a thread while the GPU runs this one, into the other of two buffers.  The rows
     // depend only on the tokens (the two before a position name its n-grams), so this is the same data.
