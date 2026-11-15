@@ -22,10 +22,11 @@ bool run_iq4_w4a8(const Product& p, void* stream);
 /// IQ4_NL ones only (the down products - where MMQ wastes the most: K 640 in 256-value iterations).
 int iq4_w4a8_mode();
 
-/// The compute capabilities run_iq4_w4a8 will accept.  Exported so the test and this header state the rule once:
-/// it was written out by hand in tests/cuda/prefill_iq4_w4a8_test.cu and paraphrased a third time in CMakeLists.txt,
-/// where the paraphrase had already lost the cc 120 arm.  A card that passes this can still be refused for want of a
-/// device image in this binary -- run_iq4_w4a8 reports that separately.
+/// The compute capabilities run_iq4_w4a8 will accept: the ones this fork has run the parity test on, which is sm_86
+/// alone.  Upstream accepts 8.0-8.8 and 12.0 on their own evidence; see the note at arch_ok for why that is not
+/// carried here.  Exported so the test and this header state the rule once -- it was written out by hand in
+/// tests/cuda/prefill_iq4_w4a8_test.cu and paraphrased a third time in CMakeLists.txt.  A card that passes this can
+/// still be refused for want of a device image in this binary; run_iq4_w4a8 reports that separately.
 bool w4a8_arch_ok(int cc);
 
 /// STRATA_W4A8_CFG, read once: which tile width run_iq4_w4a8 launches, 0 (the default, 128 tokens per CTA) .. 3.

@@ -220,23 +220,29 @@ IQ4_NL — the UD-IQ4_XS sets upstream measured it on — and `=2` is the safer 
 
 ### Reproducing any of the above
 
-The parity test needs a CUDA build with the test suite on. `STRATA_ENABLE_CUDA` is off by default, and the binary
-lands wherever you point the output directory, so both flags have to be there:
+Both correctness checks are one target:
 
 ```
-cmake -S . -B build-iq4test -DCMAKE_BUILD_TYPE=Release -DSTRATA_ENABLE_CUDA=ON -DSTRATA_NATIVE_EXPERTS=ON \
-      -DSTRATA_MMQ_KQUANTS=ON -DSTRATA_Q6K_EXPERTS=ON -DSTRATA_BUILD_TESTS=ON \
-      -DCMAKE_CUDA_ARCHITECTURES=86 -DCMAKE_RUNTIME_OUTPUT_DIRECTORY=$PWD/build-iq4test/bin
-cmake --build build-iq4test -j --target prefill_iq4_w4a8_test
-build-iq4test/bin/prefill_iq4_w4a8_test --tokens 4096            # parity, the shipped tile width
-build-iq4test/bin/prefill_iq4_w4a8_test --cfg 3 --tokens 4096    # one of the other three
-build-iq4test/bin/prefill_iq4_w4a8_test --bench --tokens 4096    # the table above, several times
-compute-sanitizer --tool memcheck build-iq4test/bin/prefill_iq4_w4a8_test --tokens 97
+make test-gpu
+```
+
+It builds the parity test, runs it at all four tile widths, and then runs it under `compute-sanitizer` — the only
+check here that looks at the allocations rather than the arithmetic, and the one that caught the test's own row
+table reading out of bounds. It needs a GPU and `compute-sanitizer` on `PATH`, which is why it is not in
+`make test`: that target runs with CUDA off. It exits 77, a skip, on a card the kernel has not been measured on.
+
+**It has only been measured on sm_86.** `mmq::w4a8_arch_ok()` accepts that and nothing else, so on any other card
+the kernel declines every product and MMQ runs — including cards upstream accepts (Ampere 8.0–8.8 and Blackwell
+12.0, on their own parity runs). The claim here is bit-for-bit reproduction of MMQ, and nobody has checked it on an
+A100, an Orin or a Blackwell card; widening the gate means running `make test-gpu` on one first. The cost of being
+narrow is that such an operator gets MMQ where upstream measured the kernel to be faster.
+
+For the speed figures, which `make test-gpu` deliberately does not run (they are not pass/fail):
+
+```
+build-gpu/bin/prefill_iq4_w4a8_test --bench --tokens 4096    # the table above, several times
 python3 tools/bench_switches.py prefill --arms on,with --with STRATA_IQ4_W4A8=2
 ```
-
-`make build` uses `75;86;89` and `-DSTRATA_BUILD_TESTS=OFF`; the arch is pinned to 86 above only to keep the build
-short. The test exits 77, a skip, on a card `mmq::w4a8_arch_ok()` does not accept.
 
 One caveat the test prints on every run here: `STRATA_MMQ_TAB` is off by default, so the pointer-table layout of the
 kernel is not exercised by any of this.

@@ -387,10 +387,14 @@ int cfg_index() {
     return c;
 }
 
-// The compute capabilities upstream checked the kernel's bits against MMQ's on (their prefill_iq4_w4a8_test):
-// Ampere 8.0-8.8 and Blackwell 12.0; Ada (8.9) had no card to test on there, so it keeps MMQ.  In this fork the
-// parity test has run on one card, sm_86 -- the rest of that range is upstream's evidence, not ours.
-bool arch_ok(int cc) { return (cc >= 80 && cc < 89) || cc == 120; }
+// The compute capabilities THIS fork has run the parity test on: sm_86, and nothing else.
+//
+// Upstream admits Ampere 8.0-8.8 and Blackwell 12.0 on their own prefill_iq4_w4a8_test, and excludes Ada 8.9 for
+// want of a card.  That range is their evidence, not ours, and the kernel is an opt-in whose whole claim is that it
+// reproduces MMQ bit for bit -- a claim nobody here has checked on an A100, an Orin or a Blackwell card.  So the
+// gate is what was measured.  The cost is that an operator with one of those cards gets MMQ even where upstream
+// measured the kernel to be faster; widening it means running prefill_iq4_w4a8_test on that card first.
+bool arch_ok(int cc) { return cc == 86; }
 
 // The shared-memory opt-in, checked.  Two of the four configs need more than the 48 KiB a block gets by default --
 // Cfg0 2 * (128*72 + 128*144) = 55,296 bytes and Cfg2 50,688 -- while Cfg1 (48,384) and Cfg3 (46,080) sit just under

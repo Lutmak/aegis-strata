@@ -111,7 +111,43 @@ test-engine:
 	cmake --build $(BUILD_DIR)-tests -j $(JOBS)
 	cd $(BUILD_DIR)-tests && ctest --output-on-failure
 
+# The checks that need a GPU, kept out of `make test` because that target runs on a laptop with no CUDA.
+#
+# This exists because nothing in `make test` can see the IQ4 W4A8 kernel or any of the row-table call sites:
+# `make test` builds in $(BUILD_DIR)-server with CUDA off, and `make test-engine`'s ctest set is not a usable gate
+# here (its cases want model fixtures upstream never published). Reverting any of the six sizing sites one at a
+# time failed no test at all. So the two checks that do bite live here:
+#
+#   - prefill_iq4_w4a8_test: the kernel against MMQ, bit for bit. Run at all four tile widths, because
+#     STRATA_W4A8_CFG selects between them in production and three of them had no coverage.
+#   - the same test under compute-sanitizer: the ONLY check in this tree that looks at the allocations rather than
+#     the arithmetic. It is what found an exact-sized row table in the test itself -- 281 invalid reads, with the
+#     plain run passing on whatever slack the allocator left. ~4 minutes at 97 tokens.
+#
+# Exit 77 from the test means "skipped": no CUDA device, or a card mmq::w4a8_arch_ok() has not been measured on.
+# That is reported and not treated as a pass.
+.PHONY: test-gpu
+test-gpu:
+	cmake -S . -B $(BUILD_DIR)-gpu -DCMAKE_BUILD_TYPE=Release -DSTRATA_ENABLE_CUDA=ON \
+	      -DSTRATA_NATIVE_EXPERTS=ON -DSTRATA_MMQ_KQUANTS=ON -DSTRATA_Q6K_EXPERTS=ON -DSTRATA_BUILD_TESTS=ON \
+	      "-DCMAKE_CUDA_ARCHITECTURES=$(CUDA_ARCHS)" $(SM60_FLAG) $(PORTABLE_FLAG) $(COMPILER_FLAGS) \
+	      -DCMAKE_CUDA_COMPILER=$(NVCC) \
+	      -DCMAKE_RUNTIME_OUTPUT_DIRECTORY=$(abspath $(BUILD_DIR))-gpu/bin \
+	      -DCMAKE_LIBRARY_OUTPUT_DIRECTORY=$(abspath $(BUILD_DIR))-gpu/bin $(CMAKE_EXTRA)
+	cmake --build $(BUILD_DIR)-gpu -j $(JOBS) --target prefill_iq4_w4a8_test
+	@set -e; B=$(BUILD_DIR)-gpu/bin/prefill_iq4_w4a8_test; \
+	  $$B --tokens 97 >/dev/null 2>&1; rc=$$?; \
+	  if [ $$rc = 77 ]; then $$B --tokens 97; echo "test-gpu: SKIPPED (no card this kernel has been measured on)"; exit 77; fi; \
+	  for cfg in 0 1 2 3; do echo "--- tile width $$cfg"; $$B --cfg $$cfg --tokens 97; $$B --cfg $$cfg --tokens 4096; done; \
+	  if command -v compute-sanitizer >/dev/null 2>&1; then \
+	    echo "--- compute-sanitizer memcheck (the allocations, not the arithmetic)"; \
+	    compute-sanitizer --tool memcheck --error-exitcode 1 $$B --tokens 97 | tail -3; \
+	  else \
+	    echo "test-gpu: compute-sanitizer not on PATH -- the allocation check did NOT run"; exit 1; \
+	  fi; \
+	  echo "test-gpu: all checks passed"
+
 clean:
 	# -frontend as well: that was this directory's name before the rename, so anyone who ran the suite
 	# before it kept a few hundred MB that `make clean` silently walked past.
-	trash $(BUILD_DIR) $(BUILD_DIR)-server $(BUILD_DIR)-tests $(BUILD_DIR)-frontend 2>/dev/null || true
+	trash $(BUILD_DIR) $(BUILD_DIR)-server $(BUILD_DIR)-tests $(BUILD_DIR)-gpu $(BUILD_DIR)-frontend 2>/dev/null || true
