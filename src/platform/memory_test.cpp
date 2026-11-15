@@ -4,6 +4,9 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#if !defined(_WIN32)
+#include <sys/resource.h>
+#endif
 
 #if defined(_WIN32)
 #define WIN32_LEAN_AND_MEAN
@@ -82,6 +85,24 @@ int main() {
     const strata::platform::LockResult r = strata::platform::lock_resident(p, bytes);
     std::printf("lock_resident: ok=%d locked=%llu MiB (%s)\n", (int) r.ok, (unsigned long long) (r.locked_bytes >> 20),
                 r.note.c_str());
+    // RLIMIT_MEMLOCK below the region is the machine's configuration, not a defect in lock_resident: on a default
+    // Linux box the limit is 8 MiB and this asks for 256. Reported as a skip (77) rather than a failure, so the rest
+    // of the suite stays a usable gate -- but ONLY when that is demonstrably the cause, and only if the keeps-table
+    // assertions above passed. Everything else about lock_resident is still a hard failure.
+#if !defined(_WIN32)
+    if (!fail_keeps && !r.ok && r.note.find("ulimit -l") != std::string::npos) {
+        rlimit lim{};
+        const bool got = getrlimit(RLIMIT_MEMLOCK, &lim) == 0;
+        if (got && lim.rlim_cur != RLIM_INFINITY && lim.rlim_cur < bytes) {
+            std::printf("platform_memory_test: SKIP - RLIMIT_MEMLOCK is %llu MiB, this needs %llu MiB.\n"
+                        "           Raise it (ulimit -l, or LimitMEMLOCK= in a unit file) to run this check.\n",
+                        (unsigned long long) (lim.rlim_cur >> 20), (unsigned long long) (bytes >> 20));
+            strata::platform::unlock_resident(p, bytes);
+            std::free(p);
+            return 77;
+        }
+    }
+#endif
     int fail = !(r.ok && r.locked_bytes == bytes) | fail_keeps;
 #if defined(_WIN32)
     PROCESS_MEMORY_COUNTERS pmc{};

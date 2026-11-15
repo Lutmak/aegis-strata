@@ -252,6 +252,10 @@ int history_advance_regression() {
 int main(int argc, char** argv) {
     bool selftest = false;
     bool check_fixtures = false;
+    // --skip-without-capture: the block fixtures were never asked for (no STRATA_PLE_FIXTURE_DIR), and upstream
+    // ships none, so their absence is "nothing to compare here", reported as a skip.  Without the flag an absent
+    // fixture is a failure, because then somebody did ask for it.  Either way this never passes without comparing.
+    bool skip_without_capture = false;
     std::string pack = "pack/full";
     // --gguf, else $STRATA_PLE_GGUF, else the development layout (run from the engine root)
     std::string gguf = std::getenv("STRATA_PLE_GGUF") ? std::getenv("STRATA_PLE_GGUF")
@@ -260,12 +264,13 @@ int main(int argc, char** argv) {
     for (int i = 1; i < argc; ++i) {
         const std::string a = argv[i];
         if (a == "--selftest") selftest = true;
+        else if (a == "--skip-without-capture") skip_without_capture = true;
         else if (a == "--check-fixtures") check_fixtures = true;
         else if (a == "--pack" && i + 1 < argc) pack = argv[++i];
         else if (a == "--gguf" && i + 1 < argc) gguf = argv[++i];
         else if (a == "--in" && i + 1 < argc) in_bin = argv[++i];
         else if (a == "--out" && i + 1 < argc) out_bin = argv[++i];
-        else { std::fprintf(stderr, "usage: ple_parity [--selftest] [--check-fixtures] [--pack D] [--gguf F] [--in F] [--out F]\n");
+        else { std::fprintf(stderr, "usage: ple_parity [--selftest] [--check-fixtures] [--skip-without-capture] [--pack D] [--gguf F] [--in F] [--out F]\n");
                return 2; }
     }
     if (selftest && check_fixtures) {
@@ -279,6 +284,12 @@ int main(int argc, char** argv) {
     PleCapture cap;
     bool preflight_done = false;
     if (selftest || check_fixtures) {
+        if (skip_without_capture && file_size(gguf.c_str()) < 0) {
+            std::printf("ple_parity: SKIP - no PLE table at %s. This test needs a Q2_0 shard, the dense pack and a\n"
+                        "           block capture; none are shipped. Configure -DSTRATA_PLE_FIXTURE_DIR=<dir> and\n"
+                        "           pass --gguf/--pack to run it.\n", gguf.c_str());
+            return 77;
+        }
         if (!table.open(gguf, err) || table.rows() != o::kTableRows ||
             file_size(gguf.c_str()) != (long long) o::kTableDataStart + (long long) o::kTableRows * k::PLE_ROW_BYTES) {
             std::fprintf(stderr, "ple_parity: required PLE table is missing or incompatible: %s (%s)\n", gguf.c_str(), err.c_str());
@@ -287,11 +298,22 @@ int main(int argc, char** argv) {
         const uint64_t pack_needed = std::max({o::kKeyCodesOffset + o::kKeyCodesBytes,
             o::kKeyScalesOffset + o::kKeyScalesBytes, o::kValueOffset + o::kValueBytes});
         const long long pack_size = file_size((pack + "/dense.bin").c_str());
+        if (skip_without_capture && pack_size < 0) {
+            std::printf("ple_parity: SKIP - no dense pack at %s/dense.bin.\n", pack.c_str());
+            return 77;
+        }
         if (pack_size < 0 || (uint64_t) pack_size < pack_needed) {
             std::fprintf(stderr, "ple_parity: required dense pack is missing or truncated: %s/dense.bin\n", pack.c_str());
             return 2;
         }
         if (!load_capture(in_bin.c_str(), out_bin.c_str(), cap)) {
+            const bool absent = file_size(in_bin.c_str()) < 0 && file_size(out_bin.c_str()) < 0;
+            if (skip_without_capture && absent) {
+                std::printf("ple_parity: SKIP - no block capture to compare against (%s / %s). These are not shipped;\n"
+                            "           configure -DSTRATA_PLE_FIXTURE_DIR=<dir> with a pair you captured to run this.\n",
+                            in_bin.c_str(), out_bin.c_str());
+                return 77;
+            }
             std::fprintf(stderr, "ple_parity: required block fixtures are missing, truncated or incompatible: %s / %s\n", in_bin.c_str(), out_bin.c_str());
             return 2;
         }

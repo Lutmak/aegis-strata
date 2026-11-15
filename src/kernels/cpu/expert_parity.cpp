@@ -78,6 +78,14 @@ float f16_at(const std::vector<uint8_t>& b, size_t off) {
 
 }  // namespace
 
+// A pack that is simply not here is a skip, not a failure: see the call site.
+static bool file_exists(const char* p) {
+    std::FILE* f = std::fopen(p, "rb");
+    if (f == nullptr) return false;
+    std::fclose(f);
+    return true;
+}
+
 int main(int argc, char** argv) {
     bool selftest = false;
     const char* path = "pack/full/experts.bin";
@@ -92,6 +100,12 @@ int main(int argc, char** argv) {
                return 2; }
     }
 
+        // The full expert pack is not shipped and this box may not have one. Absent is "nothing to compare",
+        // reported as a skip naming the file; anything else wrong with it is still a failure below.
+        if (!file_exists(path)) {
+            std::printf("%s: SKIP - no expert pack at %s. Point --file at one to run this.\n", "expert_parity", path);
+            return 77;
+        }
     int bad = 0;
 
     // ---- the CPU must be able to run the kernel, and the report must say WHICH feature is missing

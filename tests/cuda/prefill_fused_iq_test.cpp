@@ -175,7 +175,9 @@ struct MmqBufs {
     Dev xq, gu, h, hq, dm, ident, bounds, grp_gu, grp_d;
     MmqBufs(const Pair& p, int64_t rows, int E)
         : xq(mmq::q8_bytes(rows, N)), gu((size_t) rows * 1280 * 4), h((size_t) rows * FF * 4),
-          hq(mmq::q8_bytes(rows, FF)), dm((size_t) rows * N * 4), ident((size_t) mmq::mmq_ids_table_rows((uint64_t) rows, (uint64_t) rows) * 4),   // + the MMQ over-read margin
+          hq(mmq::q8_bytes(rows, FF)), dm((size_t) rows * N * 4),
+          // + the margin llama.cpp's MMQ reads past a row table (mmq_ids_margin.hpp)
+          ident((size_t) mmq::mmq_ids_table_rows((uint64_t) rows, (uint64_t) rows) * 4),
           bounds((size_t) (2 * (E + E / GROUP + 2)) * 4), grp_gu(GROUP * mmq::matrix_bytes(p.gu, 1280, N) + 4096),
           grp_d(GROUP * mmq::matrix_bytes(p.d, N, FF) + 4096) {}
 };
