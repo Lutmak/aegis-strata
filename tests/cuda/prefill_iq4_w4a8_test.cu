@@ -153,8 +153,15 @@ Result run_case(int64_t T, double sigma, bool tab, int wide, bool bench) {
     int32_t *bounds_dev, *ids;
     ck(cudaMalloc(&bounds_dev, bounds_abs.size() * 4), "bounds");
     ck(cudaMemcpy(bounds_dev, bounds_abs.data(), bounds_abs.size() * 4, cudaMemcpyHostToDevice), "bounds");
-    ck(cudaMalloc(&ids, (size_t) TK * 4), "ids");
-    mmq::iota(ids, TK, nullptr);
+    // The MMQ reference arm reads this table past its last row: llama.cpp's stream-k fixup loads a whole J-column tile
+    // of ids from each expert's first row (mmq_ids_margin.hpp).  Exact-sized, compute-sanitizer reports the over-read --
+    // "Invalid __global__ read ... 1 bytes after the nearest allocation of size 3,880 bytes" at --tokens 97, 281 errors,
+    // and the run dies with "unspecified launch failure" before printing a verdict.  An expert takes at most one row per
+    // token, so max_rows <= T over every group this test builds.
+    const uint64_t ids_rows = mmq::mmq_ids_table_rows((uint64_t) TK, (uint64_t) T);
+    if (ids_rows == 0) { std::fprintf(stderr, "ids table does not fit for T=%lld\n", (long long) T); std::exit(1); }
+    ck(cudaMalloc(&ids, (size_t) ids_rows * 4), "ids");
+    mmq::iota(ids, (int64_t) ids_rows, nullptr);
     float *gu_a, *dm_a, *gu_b, *dm_b;
     const size_t ngu = (size_t) TK * 2 * NFF, ndm = (size_t) TK * N;
     ck(cudaMalloc(&gu_a, ngu * 4), "gu_a");

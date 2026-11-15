@@ -16,6 +16,7 @@
 // --only=NAME, --chunks=A,B.  Exit 77 without a CUDA device of sm_80 or newer.
 #include "strata/prefill/moe_fused_iq.hpp"
 #include "strata/prefill/moe_mmq.hpp"
+#include "strata/prefill/mmq_ids_margin.hpp"
 
 #include "ggml.h"
 
@@ -174,7 +175,7 @@ struct MmqBufs {
     Dev xq, gu, h, hq, dm, ident, bounds, grp_gu, grp_d;
     MmqBufs(const Pair& p, int64_t rows, int E)
         : xq(mmq::q8_bytes(rows, N)), gu((size_t) rows * 1280 * 4), h((size_t) rows * FF * 4),
-          hq(mmq::q8_bytes(rows, FF)), dm((size_t) rows * N * 4), ident((size_t) rows * 4),
+          hq(mmq::q8_bytes(rows, FF)), dm((size_t) rows * N * 4), ident((size_t) mmq::mmq_ids_table_rows((uint64_t) rows, (uint64_t) rows) * 4),   // + the MMQ over-read margin
           bounds((size_t) (2 * (E + E / GROUP + 2)) * 4), grp_gu(GROUP * mmq::matrix_bytes(p.gu, 1280, N) + 4096),
           grp_d(GROUP * mmq::matrix_bytes(p.d, N, FF) + 4096) {}
 };
@@ -195,7 +196,7 @@ void run_mmq(const Pair& p, const Geo& geo, mmq::Context& ctx, MmqBufs& b, const
         for (size_t i = 0; i <= GROUP; ++i)
             bh[n + 1 + g * (GROUP + 1) + i] = bh[std::min(n, g * GROUP + i)] - bh[g * GROUP];
     ck(cudaMemcpyAsync(b.bounds.p, bh.data(), bh.size() * 4, cudaMemcpyHostToDevice, s), "bounds");
-    mmq::iota(b.ident.as<int32_t>(), rows, s);
+    mmq::iota(b.ident.as<int32_t>(), (int64_t) mmq::mmq_ids_table_rows((uint64_t) rows, (uint64_t) rows), s);
     mmq::quantize(x_dev, src_dev, b.xq.p, (int) p.gu, N, N, rows, s);
     for (size_t j = 0; j < n; ++j) {
         const size_t q = j % GROUP;

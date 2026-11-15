@@ -1165,6 +1165,7 @@ bool Gemm::native_mmq(const uint16_t* X, int type, const void* W, float* Y, int6
     // mmq_ids_margin.hpp (max_rows <= kRows), the identity written over all of it.  Exact, with only the 256 bytes of the
     // bounds after it, a tile of 112 columns on a full chunk read 384 bytes past the table, 128 past the allocation.
     const size_t ids_rows = (size_t) mmq::mmq_ids_table_rows((uint64_t) kRows, (uint64_t) kRows);
+    if (ids_rows == 0) return false;   // the four sibling sites in prefill.cpp all check this; kRows is a constant, so it cannot fire
     const size_t ident_off = up(mmq::q8_bytes(kRows, kMaxK));
     const size_t bounds_off = ident_off + up(ids_rows * 4);
     if (!mmq_buf_) {

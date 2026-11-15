@@ -45,7 +45,9 @@ namespace mmq = strata::prefill::mmq;
 
 constexpr int G = mmq::kGatherGroupMax;
 constexpr size_t TAIL = 4096;
-constexpr int64_t kIdsPad = 2048 + 128;   // > the largest max_rows of the sweep plus one tile
+// The room llama.cpp's MMQ reads past a row table, from the one place that tracks the backend's tile bound
+// (mmq_ids_margin.hpp). It was a hand-written 2048 + 128, correct only while every sweep kept max_rows <= 2048.
+constexpr int64_t kIdsPad = (int64_t) mmq::mmq_ids_table_rows(0, 2048);
 
 void ck(cudaError_t e, const char* what) {
     if (e != cudaSuccess) throw std::runtime_error(std::string(what) + ": " + cudaGetErrorString(e));

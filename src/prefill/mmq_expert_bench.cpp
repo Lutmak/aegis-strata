@@ -74,10 +74,12 @@ double run_case(const Case& c, int R, std::mt19937& rng, float* ms_out) {
     ck(cudaMalloc(&dq, mmq::q8_bytes(T, c.cols)), "xq");
     ck(cudaMalloc(&dys, (size_t) T * 4), "ys");
     ck(cudaMalloc(&dd, (size_t) T * c.rows * 4), "dst");
-    ck(cudaMalloc(&dids, (size_t) T * 4), "ids");
+    // + the margin llama.cpp's MMQ reads past a row table (mmq_ids_margin.hpp); max_rows is R below
+    const size_t ids_rows = (size_t) mmq::mmq_ids_table_rows((uint64_t) T, (uint64_t) T);
+    ck(cudaMalloc(&dids, ids_rows * 4), "ids");
     ck(cudaMalloc(&db, (E + 1) * 4), "bounds");
     ck(cudaMemcpy(db, bounds.data(), (E + 1) * 4, cudaMemcpyHostToDevice), "bounds");
-    mmq::iota(dids, T, nullptr);
+    mmq::iota(dids, (int64_t) ids_rows, nullptr);
     mmq::quantize(dx, nullptr, dq, c.t, c.cols, c.cols, T, nullptr, dys);
     mmq::Context ctx;
     mmq::Product p;

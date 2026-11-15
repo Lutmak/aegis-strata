@@ -468,7 +468,8 @@ static void mul_mat_q_tab_switch_J(ggml_backend_cuda_context & ctx, const mmq_ar
     int J_best        = 0;
     int ntiles_J_best = INT_MAX;
 
-    for (int J = 8; J <= 128 && ntiles_J_best > 1; J += 8) {
+    // the same bound the margin in mmq_ids_margin.hpp is derived from, so the two cannot drift apart
+    for (int J = 8; J <= kMmqTileColsMax && ntiles_J_best > 1; J += kMmqTileColsStep) {
         const ggml_cuda_mmq_config config = ggml_cuda_mmq_get_config(type, J, fallback, cc);
         if (config.type == GGML_TYPE_COUNT) {
             continue;
