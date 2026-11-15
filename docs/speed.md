@@ -140,6 +140,64 @@ re-measuring reproducibility rather than just speed.
 A `finish` other than `length` in a sample means the request did not run to the token count asked for, so its rate
 and its hash describe something else; the harness prints `finish` on every line for that reason.
 
+## An opt-in prompt kernel that is worth nothing on this pack: `STRATA_IQ4_W4A8`
+
+`STRATA_IQ4_W4A8=1` (or `=2` for the down products alone) runs the routed experts' IQ4_XS / IQ4_NL prompt products
+on `src/prefill/moe_iq4_w4a8.cu` instead of llama.cpp's MMQ. It is **off unless you set it**, and it is recorded here
+because the measurement is the useful part: the kernel is genuinely faster per product and **changes the prompt rate
+on this pack by nothing at all.**
+
+It is bit-exact, which is unusual for a speed switch here — it does not belong with the seven above. The kernel
+declines any launch whose sums MMQ would add in a different order (`mmq::launch_splits_k`), and what it does run is
+MMQ's tiling-mode sum bit for bit. Checked on this card at six prompt lengths against three routing distributions:
+
+```
+build-iq4test/bin/prefill_iq4_w4a8_test --tokens 32768
+PASS: 32768 tokens, routing uniform, group buffers: 1258291200 words, 0 differ, 0 unwritten
+```
+
+0 differing words in every case, 97 to 32,768 tokens. Removing the stream-k guard makes it fail at once (16,886
+differing words at 97 tokens), so the guard is what the exactness rests on, not luck.
+
+Kernel time against MMQ, `--bench`, on the RTX 3080 Ti:
+
+| tokens | down (IQ4_NL) | gate/up (IQ4_XS), uniform routing |
+|---|---|---|
+| 2,049 | +12.4% … +53.9% | **−1.9%** |
+| 4,096 | +15.6% … +49.4% | **−3.5%** |
+| 8,191 | +10.2% … +43.8% | **−21.6%** |
+| 15,360 | +21.5% … +38.7% | **−8.9%** |
+
+The down products are faster at every length and every routing. The gate/up products are **slower** whenever routing
+is uniform, which is why `=2` exists; upstream's "+9..+70% on sm_86" is the down column, not the whole switch.
+
+**And end to end it is nothing.** Measured against the engine's own defaults, both arms interleaved:
+
+| prompt tokens | default | with `=2` |
+|---|---|---|
+| 2,103 | 1,304.7 tok/s | 1,309.1 tok/s |
+| 8,613 | 2,423.5 tok/s | 2,428.7 tok/s |
+
++0.3% and +0.2%, inside the spread of a single arm. The kernel did run — the engine's own exit line says it ran
+3,211 IQ4_NL products — so this is a real measurement of a real path, not a switch that quietly did nothing.
+
+The reason is the pack. Of this model's tensors, the ones this kernel can take are the **routed** expert products,
+and `Qwen3.8-Flash-Next GSQ-RCO IQ3_XXS` has **18** of those in IQ4_NL (`blk.N.ffn_down_exps.weight`). Its other 58
+IQ4_XS / IQ4_NL tensors are shared-expert (`ffn_down_shexp`, `ffn_gate_shexp`, `ffn_up_shexp`) and dense projections
+(`attn_qkv`, `attn_gate`, `ssm_out`), which this kernel does not claim. `=1` and `=2` therefore measure the same
+thing here: with `=1` the engine reported `ran 0 IQ4_XS and 3213 IQ4_NL products`.
+
+So: **leave it off on this pack.** It is worth setting on a model whose routed gate/up and down experts are IQ4_XS or
+IQ4_NL — the UD-IQ4_XS sets upstream measured it on — and `=2` is the safer value of the two on this card, because
+the gate/up arm can lose 20%. Reproduce any of the above with:
+
+```
+cmake -S . -B build-iq4test -DSTRATA_BUILD_TESTS=ON -DCMAKE_CUDA_ARCHITECTURES=86   # plus the flags `make build` uses
+cmake --build build-iq4test --target prefill_iq4_w4a8_test
+build-iq4test/bin/prefill_iq4_w4a8_test --bench --tokens 4096
+python3 tools/bench_switches.py prefill --arms on,with --with STRATA_IQ4_W4A8=2
+```
+
 ## Prefill is not affected by any of this
 
 Reading the prompt is a separate path and none of these switches touched it measurably. For reference, on the

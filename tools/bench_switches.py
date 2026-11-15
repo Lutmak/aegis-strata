@@ -184,8 +184,24 @@ def gpu_is_idle() -> bool:
 
 
 
-def arms_for(drop: str | None) -> dict[str, dict[str, str]]:
-    """The two environments to compare.
+def parse_with(pairs: list[str] | None) -> dict[str, str]:
+    """`--with KEY=VALUE` (repeatable): the variables of the extra "with" arm, checked here rather than at use.
+
+    This exists because the only comparisons the tool could make were inside the sm_86 table. A switch that is not
+    in the table -- an opt-in kernel like STRATA_IQ4_W4A8, or an upstream default being evaluated here for the
+    first time -- had no arm, so measuring one meant editing this file.
+    """
+    out: dict[str, str] = {}
+    for item in pairs or []:
+        key, sep, value = item.partition("=")
+        if not sep or not key.startswith("STRATA_"):
+            raise SystemExit(f"--with: expected STRATA_KEY=VALUE, got {item!r}")
+        out[key] = value
+    return out
+
+
+def arms_for(drop: str | None, with_vars: dict[str, str] | None = None) -> dict[str, dict[str, str]]:
+    """The environments to compare.
 
     "on" is deliberately EMPTY: the engine applies its own sm_86 table, so this measures the default path a user
     gets rather than a hand-built environment that happens to name the same variables. assert_default_applied()
@@ -197,11 +213,18 @@ def arms_for(drop: str | None) -> dict[str, dict[str, str]]:
     all -- they could only measure a subset against nothing.
     """
     if drop is None:
-        return {"off": {"STRATA_SM86_PERF": "0"}, "on": {}}
-    if drop not in SM86_SWITCHES:
+        arms = {"off": {"STRATA_SM86_PERF": "0"}, "on": {}}
+    elif drop not in SM86_SWITCHES:
         raise SystemExit(f"--drop: {drop} is not in the table; choose from {', '.join(sorted(SM86_SWITCHES))}")
-    minus = {k: v for k, v in SM86_SWITCHES.items() if k != drop}
-    return {"off": minus, "on": dict(SM86_SWITCHES)}
+    else:
+        minus = {k: v for k, v in SM86_SWITCHES.items() if k != drop}
+        arms = {"off": minus, "on": dict(SM86_SWITCHES)}
+    # "with" is the "on" arm plus --with: the default path a user gets, and one more switch on top of it, so the
+    # pair isolates that switch and nothing else.  Named only when --with was given, so `--arms with` without it
+    # fails as an unknown arm instead of silently measuring "on" twice.
+    if with_vars:
+        arms["with"] = arms["on"] | with_vars
+    return arms
 
 
 def assert_default_applied(srv: "Server", arm: str, drop: str | None) -> None:
@@ -210,7 +233,9 @@ def assert_default_applied(srv: "Server", arm: str, drop: str | None) -> None:
     Without this the tool cannot tell "the defaults are on" from "the defaults silently did nothing", which is
     the exact failure it is supposed to detect.
     """
-    if arm != "on" or drop is not None:
+    # "with" is the default path too (it adds a switch the table does not name), so it gets the same check: a
+    # "with" arm that silently lost the table would otherwise be compared against an "on" arm that kept it.
+    if arm not in ("on", "with") or drop is not None:
         return
     text = srv.log.read_text(errors="replace")
     if "speed switches on by default" not in text:
@@ -313,7 +338,7 @@ def fmt(xs: list[float]) -> str:
 
 def cmd_decode(args: argparse.Namespace) -> int:
     logdir = Path(args.logdir)
-    arms = arms_for(getattr(args, "drop", None))
+    arms = arms_for(getattr(args, "drop", None), parse_with(getattr(args, "with_", None)))
     results: dict[str, list[Sample]] = {"off": [], "on": []}
     order: list[str] = []
     for i in range(args.pairs):
@@ -368,7 +393,7 @@ def cmd_decode(args: argparse.Namespace) -> int:
 def cmd_prefill(args: argparse.Namespace) -> int:
     logdir = Path(args.logdir)
     targets = [int(t) for t in args.tokens.split(",")]
-    arms = arms_for(getattr(args, "drop", None))
+    arms = arms_for(getattr(args, "drop", None), parse_with(getattr(args, "with_", None)))
     out: dict[str, dict[int, list[Sample]]] = {}
     for arm in args.arms.split(","):
         print(f"arm={arm} starting server ...", flush=True)
@@ -433,6 +458,10 @@ def main() -> int:
     # Both arms by default. It measured only "off" before, so the documented `bench_switches.py prefill`
     # printed a one-arm table while reading like a comparison.
     f.add_argument("--arms", default="off,on")
+    # The prompt path is where an opt-in expert kernel shows up, so the extra arm lives on this subcommand only:
+    # `--arms on,with --with STRATA_IQ4_W4A8=2` is the default path against the default path plus that kernel.
+    f.add_argument("--with", dest="with_", metavar="STRATA_KEY=VALUE", action="append",
+                   help="add a variable to the 'with' arm (repeatable); name it in --arms to measure it")
     f.add_argument("--out", default="bench-prefill.json")
     f.set_defaults(func=cmd_prefill)
 
