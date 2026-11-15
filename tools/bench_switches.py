@@ -196,6 +196,14 @@ def parse_with(pairs: list[str] | None) -> dict[str, str]:
         key, sep, value = item.partition("=")
         if not sep or not key.startswith("STRATA_"):
             raise SystemExit(f"--with: expected STRATA_KEY=VALUE, got {item!r}")
+        # An empty value is how a shell turns one of this engine's switches OFF (nv_defaults.cpp documents
+        # STRATA_SM86_PERF= as exactly that), so `--with STRATA_X=` would measure the default path twice and report
+        # the agreement as a measurement of STRATA_X.
+        if value == "":
+            raise SystemExit(f"--with: {key} needs a value; an empty one turns most of these switches off, so the "
+                             f"'with' arm would be the same as 'on'")
+        if key in out:
+            raise SystemExit(f"--with: {key} given twice")
         out[key] = value
     return out
 
@@ -242,6 +250,33 @@ def assert_default_applied(srv: "Server", arm: str, drop: str | None) -> None:
         raise RuntimeError(
             "the engine did not print its sm_86 startup line, so the default table was NOT applied: this arm "
             f"would measure the slow path and report it as the default. See {srv.log}"
+        )
+
+
+def assert_with_took_effect(srv: "Server", arm: str, with_vars: dict[str, str]) -> None:
+    """On a "with" arm, fail unless the engine said something about each switch the arm added.
+
+    The arm's whole claim is "the default path, plus this switch". Nothing checked that the switch did anything, and
+    the ways it can quietly do nothing are ordinary: a typo in the name, a value the engine parses as off, a kernel
+    that declines every product on this card, a build without the device code. All of them produce a "with" arm that
+    measures the default path a second time, two columns that agree, and the conclusion "the switch is worth nothing"
+    -- which is indistinguishable from "the switch did nothing". That is lesson 24 one level up: a harness for a
+    switch must drive the switch and then prove it was driven.
+
+    The proof used is the engine's own habit of naming a switch it has honoured (docs/speed.md rests on the same
+    habit for the sm_86 table). A switch that announces nothing cannot be measured by this tool without being taught
+    here, and failing is the right answer then: a silent arm is not evidence.
+    """
+    if arm != "with" or not with_vars:
+        return
+    text = srv.log.read_text(errors="replace")
+    silent = [k for k in with_vars if k not in text and k.removeprefix("STRATA_") not in text]
+    if silent:
+        raise RuntimeError(
+            f"the 'with' arm set {', '.join(silent)} and the engine never mentioned {'it' if len(silent) == 1 else 'them'}: "
+            f"this arm measured the default path again, so comparing it against 'on' would show no difference whatever "
+            f"the switch is worth. Check the spelling and the value, and that this card and build have the code behind "
+            f"it. See {srv.log}"
         )
 
 
@@ -395,12 +430,20 @@ def cmd_prefill(args: argparse.Namespace) -> int:
     targets = [int(t) for t in args.tokens.split(",")]
     arms = arms_for(getattr(args, "drop", None), parse_with(getattr(args, "with_", None)))
     out: dict[str, dict[int, list[Sample]]] = {}
-    for arm in args.arms.split(","):
+    wanted = args.arms.split(",")
+    unknown = [a for a in wanted if a not in arms]
+    if unknown:
+        raise SystemExit(f"--arms: no such arm {', '.join(unknown)}; this run has {', '.join(sorted(arms))}"
+                         f"{' (name one with --with to get a \'with\' arm)' if 'with' not in arms else ''}")
+    for arm in wanted:
         print(f"arm={arm} starting server ...", flush=True)
         srv = start(arms[arm], logdir / f"prefill-{arm}.log")
         out[arm] = {}
         try:
             completion(srv, "Say the word ready.", 8)
+            # The check cmd_decode has always done, and the reason this function was extended for the "with" arm:
+            # without it an arm that silently lost the engine's own table is compared against one that kept it.
+            assert_default_applied(srv, arm, getattr(args, "drop", None))
             for t in targets:
                 prompt = filler(t)
                 real = tokenize_len(prompt)
@@ -418,6 +461,9 @@ def cmd_prefill(args: argparse.Namespace) -> int:
                     print(f"    {arm} target={t} actual={s.prompt_n} "
                           f"prefill {s.prefill_tps:8.2f} tok/s ({s.prompt_ms:.0f} ms)", flush=True)
                 out[arm][real] = reps
+            # After the requests, not beside assert_default_applied: a prompt-path switch is announced on its first
+            # use, so at startup the log is silent about it even when everything is right.
+            assert_with_took_effect(srv, arm, parse_with(getattr(args, "with_", None)))
         finally:
             srv.stop()
 
@@ -472,6 +518,14 @@ def main() -> int:
     # Absolute, because the server runs with cwd=PROJECT: a bare --out used to drop the JSON into whatever
     # directory the tool was invoked from, which for a reader following docs/speed.md is the repository root.
     args.out = str(Path(args.out).resolve())
+    # The argument checks come before the machine checks: a typo in --with or --arms used to be reported only on a box
+    # that already had an idle GPU and the model on disk, so the feedback an operator got for a misspelled switch
+    # depended on machine state.  parse_with raises; arms_for rejects an unknown --drop.
+    arms_now = arms_for(getattr(args, "drop", None), parse_with(getattr(args, "with_", None)))
+    unknown = [a for a in getattr(args, "arms", "").split(",") if a and a not in arms_now]
+    if unknown:
+        print(f"--arms: no such arm {', '.join(unknown)}; this run has {', '.join(sorted(arms_now))}", file=sys.stderr)
+        return 2
     if not gpu_is_idle():
         return 2
     for path in (SHARD1, SHARD2, MODELS / "pack-iq3-xxs", MODELS / "mtp/rt"):
