@@ -1219,6 +1219,16 @@ if(STRATA_ENABLE_CUDA OR STRATA_ENABLE_HIP)
   target_link_libraries(ple_reader_test PRIVATE strata_kernels ${_strata_gpu_runtime_target})
   add_test(NAME ple_reader_selftest COMMAND ple_reader_test --selftest)
 
+  # Upstream #3602: the same reader under load - several clients, a tiny row cache, one in-flight slot, injected
+  # delays, rows on every page phase, late-writer checks, and the reader after a failed read. That last case is the
+  # one that matters here: against the unfixed reader it hangs, and the timeout below is what turns a hang into a
+  # failure rather than a stalled suite. CPU and a temp file only; 77 = this machine has no direct reads.
+  add_executable(ple_reader_stress_test src/ngram/ple_reader_stress_test.cpp)
+  target_include_directories(ple_reader_stress_test PRIVATE ${_strata_gpu_include_directories})
+  target_link_libraries(ple_reader_stress_test PRIVATE strata_kernels ${_strata_gpu_runtime_target})
+  add_test(NAME ple_reader_stress COMMAND ple_reader_stress_test)
+  set_tests_properties(ple_reader_stress PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 300)
+
   # The GPU test runs ON THE TARGET PC. `--selftest` allocates
   # and writes real VRAM, so a machine without a device fails this test rather than skipping it silently -
   # which is correct: an engine that targets one GPU should not report a pass for having no GPU.
