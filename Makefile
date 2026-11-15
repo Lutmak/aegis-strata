@@ -74,13 +74,16 @@ server:
 # backpressure, child exit, ERR) and the HTTP surface a coding agent touches (server/tests/e2e.sh).  Needs python3
 # and curl; no GPU and no model.  Runs in the CUDA-free build directory, so it works on the build box and on a laptop.
 test: server
-	cmake --build $(BUILD_DIR)-server -j $(JOBS) --target engine_test literals_test picture_cache_test nv_defaults_test sandbox_test
+	cmake --build $(BUILD_DIR)-server -j $(JOBS) --target engine_test literals_test picture_cache_test nv_defaults_test mmq_ids_margin_test sandbox_test
 	$(BUILD_DIR)-server/bin/engine_test server/tests/fake-engine.py
 	$(BUILD_DIR)-server/bin/literals_test
 	$(BUILD_DIR)-server/bin/picture_cache_test
 # The sm_86 switches the engine turns on by itself (docs/speed.md): that they apply to sm_86 and nothing else,
 # that an operator's own setting always wins, and that the two ADAPT variables stay paired.
 	$(BUILD_DIR)-server/bin/nv_defaults_test
+# The MMQ row table's over-read margin: llama.cpp's stream-k fixup loads a whole J-column tile of `ids` from each
+# expert's first row, so an exact-sized table is read past its end (and faults when it ends a page).
+	$(BUILD_DIR)-server/bin/mmq_ids_margin_test
 	server/tests/e2e.sh $(BUILD_DIR)-server/bin/aegis
 # The documentation makes checkable claims, so they get checked: file:line citations that resolve,
 # backticked paths that exist, the filter's instruction count and kill list against the code, and quoted

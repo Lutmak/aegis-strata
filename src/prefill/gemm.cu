@@ -2,6 +2,7 @@
 #include "strata/prefill/gemm.hpp"
 #include "strata/kernels/dequant_bf16.hpp"
 #if defined(STRATA_PREFILL_MMQ) && defined(__HIPCC__)
+#include "strata/prefill/mmq_ids_margin.hpp"
 #include "strata/prefill/moe_mmq.hpp"
 #endif
 
@@ -550,8 +551,10 @@ bool prompt_f16() {
                                  "(rocBLAS is tuned only for that on gfx103x; not bit-identical to the default)%s",
                          dev, p.gcnArchName[0] ? " " : "", p.gcnArchName, "\n");
     else if (e == nullptr && std::strncmp(p.gcnArchName, "gfx103", 6) == 0)
+        // (the pointer to docs/AMD_HIP.md is gone with the document: this fork ships Linux + CUDA only, and a tip must
+        // not send an operator to a file that is not here -- check_docs.py check 6 sees this file now that it is edited)
         std::fprintf(stderr, "strata prefill: HIP device %d %s - tip: STRATA_HIP_PROMPT_F16=1 reads long prompts about 2x faster here "
-                             "(FP16 prompt GEMMs, rocBLAS is tuned only for FP16 on gfx103x; the numbers differ slightly, see docs/AMD_HIP.md)%s",
+                             "(FP16 prompt GEMMs, rocBLAS is tuned only for FP16 on gfx103x; the numbers differ slightly)%s",
                      dev, p.gcnArchName, "\n");
     cached[dev].store(on ? 2 : 1, std::memory_order_relaxed);
     return on;
@@ -1157,8 +1160,13 @@ bool Gemm::native_mmq(const uint16_t* X, int type, const void* W, float* Y, int6
     if (ldy <= 0) ldy = N;
 
     const auto up = [](size_t v) { return (v + 255) & ~(size_t) 255; };
+    // The row table is read past its end by llama.cpp's MMQ (mul_mat_q: a whole J-column tile from the start of each tile,
+    // J up to 128; the stream-k fixup: up to roundup(max_rows, J) from the expert's first row): kRows + the margin of
+    // mmq_ids_margin.hpp (max_rows <= kRows), the identity written over all of it.  Exact, with only the 256 bytes of the
+    // bounds after it, a tile of 112 columns on a full chunk read 384 bytes past the table, 128 past the allocation.
+    const size_t ids_rows = (size_t) mmq::mmq_ids_table_rows((uint64_t) kRows, (uint64_t) kRows);
     const size_t ident_off = up(mmq::q8_bytes(kRows, kMaxK));
-    const size_t bounds_off = ident_off + up((size_t) kRows * 4);
+    const size_t bounds_off = ident_off + up(ids_rows * 4);
     if (!mmq_buf_) {
         if (cudaMalloc(&mmq_buf_, bounds_off + 256) != cudaSuccess) {
             cudaGetLastError();
@@ -1166,7 +1174,7 @@ bool Gemm::native_mmq(const uint16_t* X, int type, const void* W, float* Y, int6
             return false;
         }
         mmq_ctx_ = new mmq::Context();
-        mmq::iota((int32_t*) ((uint8_t*) mmq_buf_ + ident_off), kRows, stream_);
+        mmq::iota((int32_t*) ((uint8_t*) mmq_buf_ + ident_off), (int64_t) ids_rows, stream_);
         std::fprintf(stderr, "prefill gemm: dense MMQ on (STRATA_DENSE_MMQ=1)\n");
     }
     void* xq = mmq_buf_;

@@ -1970,6 +1970,13 @@ if(STRATA_FRONTEND AND STRATA_NATIVE_EXPERTS)
   add_executable(nv_defaults_test EXCLUDE_FROM_ALL src/core/nv_defaults_test.cpp src/core/nv_defaults.cpp)
   target_include_directories(nv_defaults_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
   target_compile_features(nv_defaults_test PRIVATE cxx_std_20)
+
+  # The MMQ row table's over-read margin (strata/prefill/mmq_ids_margin.hpp): every index llama.cpp's stream-k fixup
+  # and main kernel can read stays inside the table. Header-only, no GPU, so it belongs here with nv_defaults_test
+  # rather than under STRATA_BUILD_TESTS, whose ctest targets `make build` never builds.
+  add_executable(mmq_ids_margin_test EXCLUDE_FROM_ALL tests/prefill/mmq_ids_margin_test.cpp)
+  target_include_directories(mmq_ids_margin_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+  target_compile_features(mmq_ids_margin_test PRIVATE cxx_std_20)
   target_compile_features(picture_cache_test PRIVATE cxx_std_20)
   find_package(Threads REQUIRED)
   target_link_libraries(picture_cache_test PRIVATE Threads::Threads)
