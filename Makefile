@@ -109,14 +109,18 @@ test-engine:
 	      -DCMAKE_RUNTIME_OUTPUT_DIRECTORY=$(abspath $(BUILD_DIR))-tests/bin \
 	      -DCMAKE_LIBRARY_OUTPUT_DIRECTORY=$(abspath $(BUILD_DIR))-tests/bin $(CMAKE_EXTRA)
 	cmake --build $(BUILD_DIR)-tests -j $(JOBS)
-	cd $(BUILD_DIR)-tests && ctest --output-on-failure
+# --no-tests=error: ctest exits 0 when it finds NO tests, so a configure change that dropped a whole block of
+# registrations would leave this target green and silent. Proven: an empty CTestTestfile.cmake gives
+# "No tests were found!!!" and exit 0. The flag turns that into the failure it is.
+	cd $(BUILD_DIR)-tests && ctest --output-on-failure --no-tests=error
 
 # The checks that need a GPU, kept out of `make test` because that target runs on a laptop with no CUDA.
 #
 # This exists because nothing in `make test` can see the IQ4 W4A8 kernel or any of the row-table call sites:
-# `make test` builds in $(BUILD_DIR)-server with CUDA off, and `make test-engine`'s ctest set is not a usable gate
-# here (its cases want model fixtures upstream never published). Reverting any of the six sizing sites one at a
-# time failed no test at all. So the two checks that do bite live here:
+# `make test` builds in $(BUILD_DIR)-server with CUDA off. `make test-engine` does build them and is now a usable
+# gate (it exits 0, with the cases that need unshipped fixtures reporting themselves as skips), but it does not
+# cover these two: the IQ4 parity test is registered there, yet nothing runs it under compute-sanitizer, and the
+# tile widths need driving one at a time. So the two checks that do bite live here:
 #
 #   - prefill_iq4_w4a8_test: the kernel against MMQ, bit for bit. Run at all four tile widths, because
 #     STRATA_W4A8_CFG selects between them in production and three of them had no coverage.
