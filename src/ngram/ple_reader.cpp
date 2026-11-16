@@ -434,6 +434,12 @@ PleReader::Ticket PleReader::issue(const uint32_t* rows, size_t n, uint8_t* out_
     // is not queued: it has no jobs, and `collect` returns the error at once.
     if (!m.error.empty()) {
         ts.pending = 0;
+        // The path below always writes every row of out_raw -- zeroes for a row past the table, a copy for a cache
+        // hit, a read for the rest -- so a caller that ignored collect()'s false return still saw defined bytes.
+        // Returning here wrote nothing at all, which is a weaker contract than the one the callers were given.
+        // Every caller in this tree does honour the false return, so nothing reads it today; zero it anyway rather
+        // than leave the guarantee conditional on that staying true.
+        if (out_raw != nullptr && n > 0) std::memset(out_raw, 0, n * (size_t) m.row_bytes);
         return Ticket{id};
     }
     std::unordered_map<uint64_t, size_t> by_page;     // aligned offset -> index in `jobs`
