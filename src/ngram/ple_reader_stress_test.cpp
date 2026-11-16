@@ -1,7 +1,7 @@
 // src/ngram/ple_reader_stress_test.cpp - #3602: the direct table reader under load, every delivered row compared byte
 // for byte with a plain buffered read of the same file.  CPU and a temp file only, no model, no GPU.
 //
-//   ple_reader_stress_test [--dir D] [--seconds S] [--big] [--no-sparse-check]
+//   ple_reader_stress_test [--dir D] [--seconds S] [--big] [--only-error-path]
 //
 // What it covers that ple_reader_test --selftest does not:
 //   * several client threads issuing and collecting at once (the io thread, the row cache and the slot buffers are
@@ -215,10 +215,22 @@ void client(ng::PleReader& rd, const Spec& s, const Picker& pk, const std::strin
         std::vector<int> order((size_t) k);
         for (int j = 0; j < k; ++j) order[(size_t) j] = j;
         std::shuffle(order.begin(), order.end(), rng);
-        for (int j : order) {
+        for (size_t oi = 0; oi < order.size(); ++oi) {
+            const int j = order[oi];
             std::string err;
             if (!rd.collect(ts[(size_t) j], err)) {
                 CHECK(false, "collect failed: %s", err.c_str());
+                // Drain the rest of this batch before `ds` goes out of scope. Those tickets were issued BEFORE the
+                // error, so they carry real jobs whose Use::dst points into ds[...].buf, and PleReader::finish()
+                // memcpy's into dst without consulting `error`; max_inflight reaches 64 in some configurations here,
+                // and the worker is live until run_config joins. Returning straight out freed the buffers under it --
+                // a use-after-free that fires only once this test has found a reader bug, which is exactly when a
+                // clean "FAIL ... row N differs" matters more than anything else. Each collect returns promptly: a
+                // failed reader drives every affected ticket's pending to 0 before the worker parks.
+                for (size_t rest = oi + 1; rest < order.size(); ++rest) {
+                    std::string ignored;
+                    (void) rd.collect(ts[(size_t) order[rest]], ignored);
+                }
                 return;
             }
             verify(ref, ds[(size_t) j], s.rb, "ticket", true);
