@@ -1155,8 +1155,9 @@ if(STRATA_ENABLE_CUDA OR STRATA_ENABLE_HIP)
   set(STRATA_PLE_FIXTURE_DIR "" CACHE PATH
       "Directory holding the ple_in.bin and ple_out.bin parity fixtures (not shipped)")
   if(STRATA_PLE_FIXTURE_DIR STREQUAL "")
+    # No --in/--out here on purpose: naming a path explicitly now means "I asked for this", which suppresses the
+    # skip so that a typo fails instead of going green. Leaving the defaults lets the skip fire and name them.
     add_test(NAME ple_parity COMMAND ple_parity --selftest --skip-without-capture
-      --in "ple_in.bin" --out "ple_out.bin"
       WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
     set_tests_properties(ple_parity PROPERTIES SKIP_RETURN_CODE 77)
   else()

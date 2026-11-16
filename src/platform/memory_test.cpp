@@ -5,6 +5,7 @@
 #include <cstdlib>
 #include <cstring>
 #if !defined(_WIN32)
+#include <sys/mman.h>
 #include <sys/resource.h>
 #endif
 
@@ -86,17 +87,41 @@ int main() {
     std::printf("lock_resident: ok=%d locked=%llu MiB (%s)\n", (int) r.ok, (unsigned long long) (r.locked_bytes >> 20),
                 r.note.c_str());
     // RLIMIT_MEMLOCK below the region is the machine's configuration, not a defect in lock_resident: on a default
-    // Linux box the limit is 8 MiB and this asks for 256. Reported as a skip (77) rather than a failure, so the rest
-    // of the suite stays a usable gate -- but ONLY when that is demonstrably the cause, and only if the keeps-table
-    // assertions above passed. Everything else about lock_resident is still a hard failure.
+    // Linux box the limit is 8 MiB and this asks for 256. That is worth a skip rather than a failure, so the rest of
+    // the suite stays a usable gate -- but it has to be ESTABLISHED, not inferred.
+    //
+    // The first version of this gate asked `r.note.find("ulimit -l")`, which is not evidence: lock_resident sets
+    // that one string for every non-zero mlock() return (memory.cpp:176), errno is never looked at, and
+    // `rlim_cur < bytes` is permanently true on any box whose limit is under 256 MiB. So a real defect -- a stale
+    // or misaligned pointer, a length past the mapping, a region never mapped -- produced the identical note and
+    // the identical ENOMEM, satisfied both halves, and printed "RLIMIT_MEMLOCK is 8 MiB" while the regression went
+    // unreported. A 4 KiB unmapped range reproduces it exactly, well under the limit.
+    //
+    // So probe positively instead: lock something that MUST succeed if the limit is the only obstacle. A page is
+    // under every non-zero limit, and this process has not locked anything else yet. If the small lock works and
+    // the large one did not, the limit is the difference and nothing else is. If the small lock fails too, the
+    // limit is not the whole story and this stays a failure.
 #if !defined(_WIN32)
-    if (!fail_keeps && !r.ok && r.note.find("ulimit -l") != std::string::npos) {
+    if (!fail_keeps && !r.ok) {
         rlimit lim{};
         const bool got = getrlimit(RLIMIT_MEMLOCK, &lim) == 0;
-        if (got && lim.rlim_cur != RLIM_INFINITY && lim.rlim_cur < bytes) {
-            std::printf("platform_memory_test: SKIP - RLIMIT_MEMLOCK is %llu MiB, this needs %llu MiB.\n"
-                        "           Raise it (ulimit -l, or LimitMEMLOCK= in a unit file) to run this check.\n",
-                        (unsigned long long) (lim.rlim_cur >> 20), (unsigned long long) (bytes >> 20));
+        const bool under = got && lim.rlim_cur != RLIM_INFINITY && lim.rlim_cur < bytes;
+        bool one_page_locks = false;
+        if (under) {
+            const size_t page = 4096;
+            void* probe = std::malloc(page);
+            if (probe != nullptr) {
+                std::memset(probe, 1, page);
+                one_page_locks = mlock(probe, page) == 0;
+                if (one_page_locks) munlock(probe, page);
+                std::free(probe);
+            }
+        }
+        if (under && one_page_locks) {
+            std::fprintf(stderr, "platform_memory_test: SKIP - RLIMIT_MEMLOCK is %llu bytes, this needs %llu. One page\n"
+                         "           locks here, so the limit is the only obstacle. Raise it (ulimit -l, or\n"
+                         "           LimitMEMLOCK= in a unit file) to run this check.\n",
+                         (unsigned long long) lim.rlim_cur, (unsigned long long) bytes);
             strata::platform::unlock_resident(p, bytes);
             std::free(p);
             return 77;

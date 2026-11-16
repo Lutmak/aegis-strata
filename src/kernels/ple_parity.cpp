@@ -11,6 +11,7 @@
 //      conv_out, result), so a mismatch can be attributed to a stage instead of guessed at - and the weights
 //      in it were checked to be the artifact's real ones before this test was written.
 #include "strata/kernels/ple.hpp"
+#include "fixture_absent.hpp"
 #include "strata/kernels/ngram.hpp"
 #include "strata/kernels/f16_bits.hpp"
 #include "strata/kernels/native_mmvq.hpp"
@@ -256,6 +257,11 @@ int main(int argc, char** argv) {
     // ships none, so their absence is "nothing to compare here", reported as a skip.  Without the flag an absent
     // fixture is a failure, because then somebody did ask for it.  Either way this never passes without comparing.
     bool skip_without_capture = false;
+    // Set for any input the operator named explicitly. --skip-without-capture says "the fixtures were never asked
+    // for"; it is passed whenever STRATA_PLE_FIXTURE_DIR is empty, which is independent of $STRATA_PLE_GGUF and of
+    // --gguf/--pack/--in/--out. Without this, pointing the env var at a mistyped path produced a green skip.
+    bool gguf_given = std::getenv("STRATA_PLE_GGUF") != nullptr;
+    bool pack_given = false, capture_given = false;
     std::string pack = "pack/full";
     // --gguf, else $STRATA_PLE_GGUF, else the development layout (run from the engine root)
     std::string gguf = std::getenv("STRATA_PLE_GGUF") ? std::getenv("STRATA_PLE_GGUF")
@@ -266,10 +272,10 @@ int main(int argc, char** argv) {
         if (a == "--selftest") selftest = true;
         else if (a == "--skip-without-capture") skip_without_capture = true;
         else if (a == "--check-fixtures") check_fixtures = true;
-        else if (a == "--pack" && i + 1 < argc) pack = argv[++i];
-        else if (a == "--gguf" && i + 1 < argc) gguf = argv[++i];
-        else if (a == "--in" && i + 1 < argc) in_bin = argv[++i];
-        else if (a == "--out" && i + 1 < argc) out_bin = argv[++i];
+        else if (a == "--pack" && i + 1 < argc) { pack = argv[++i]; pack_given = true; }
+        else if (a == "--gguf" && i + 1 < argc) { gguf = argv[++i]; gguf_given = true; }
+        else if (a == "--in" && i + 1 < argc) { in_bin = argv[++i]; capture_given = true; }
+        else if (a == "--out" && i + 1 < argc) { out_bin = argv[++i]; capture_given = true; }
         else { std::fprintf(stderr, "usage: ple_parity [--selftest] [--check-fixtures] [--skip-without-capture] [--pack D] [--gguf F] [--in F] [--out F]\n");
                return 2; }
     }
@@ -284,10 +290,12 @@ int main(int argc, char** argv) {
     PleCapture cap;
     bool preflight_done = false;
     if (selftest || check_fixtures) {
-        if (skip_without_capture && file_size(gguf.c_str()) < 0) {
-            std::printf("ple_parity: SKIP - no PLE table at %s. This test needs a Q2_0 shard, the dense pack and a\n"
-                        "           block capture; none are shipped. Configure -DSTRATA_PLE_FIXTURE_DIR=<dir> and\n"
-                        "           pass --gguf/--pack to run it.\n", gguf.c_str());
+        if (skip_without_capture && !gguf_given && strata::testing::fixture_absent(gguf.c_str())) {
+            std::fprintf(stderr, "ple_parity: SKIP - no PLE table at %s. This test needs three inputs: a shard\n"
+                         "           holding the PLE table, the dense pack, and a block capture. The capture is the\n"
+                         "           one nothing ships -- configure -DSTRATA_PLE_FIXTURE_DIR=<dir> with a pair you\n"
+                         "           recorded. Point the other two at a model with $STRATA_PLE_GGUF and --pack.\n",
+                         gguf.c_str());
             return 77;
         }
         if (!table.open(gguf, err) || table.rows() != o::kTableRows ||
@@ -298,8 +306,10 @@ int main(int argc, char** argv) {
         const uint64_t pack_needed = std::max({o::kKeyCodesOffset + o::kKeyCodesBytes,
             o::kKeyScalesOffset + o::kKeyScalesBytes, o::kValueOffset + o::kValueBytes});
         const long long pack_size = file_size((pack + "/dense.bin").c_str());
-        if (skip_without_capture && pack_size < 0) {
-            std::printf("ple_parity: SKIP - no dense pack at %s/dense.bin.\n", pack.c_str());
+        if (skip_without_capture && !pack_given &&
+            strata::testing::fixture_absent((pack + "/dense.bin").c_str())) {
+            std::fprintf(stderr, "ple_parity: SKIP - no dense pack at %s/dense.bin. Point --pack at a model's pack\n"
+                         "           directory to get past this.\n", pack.c_str());
             return 77;
         }
         if (pack_size < 0 || (uint64_t) pack_size < pack_needed) {
@@ -307,11 +317,12 @@ int main(int argc, char** argv) {
             return 2;
         }
         if (!load_capture(in_bin.c_str(), out_bin.c_str(), cap)) {
-            const bool absent = file_size(in_bin.c_str()) < 0 && file_size(out_bin.c_str()) < 0;
-            if (skip_without_capture && absent) {
-                std::printf("ple_parity: SKIP - no block capture to compare against (%s / %s). These are not shipped;\n"
-                            "           configure -DSTRATA_PLE_FIXTURE_DIR=<dir> with a pair you captured to run this.\n",
-                            in_bin.c_str(), out_bin.c_str());
+            const bool absent = strata::testing::fixture_absent(in_bin.c_str()) &&
+                                strata::testing::fixture_absent(out_bin.c_str());
+            if (skip_without_capture && !capture_given && absent) {
+                std::fprintf(stderr, "ple_parity: SKIP - no block capture to compare against (%s / %s). These are not\n"
+                             "           shipped; configure -DSTRATA_PLE_FIXTURE_DIR=<dir> with a pair you recorded.\n",
+                             in_bin.c_str(), out_bin.c_str());
                 return 77;
             }
             std::fprintf(stderr, "ple_parity: required block fixtures are missing, truncated or incompatible: %s / %s\n", in_bin.c_str(), out_bin.c_str());

@@ -17,6 +17,7 @@
 // finite, non-zero scales, and the blob at a DIFFERENT layer must be different data - which is what a wrong
 // stride would break.
 #include "strata/kernels/cpu/expert.hpp"
+#include "../fixture_absent.hpp"
 
 #include <cmath>
 #include <cstdio>
@@ -78,34 +79,28 @@ float f16_at(const std::vector<uint8_t>& b, size_t off) {
 
 }  // namespace
 
-// A pack that is simply not here is a skip, not a failure: see the call site.
-static bool file_exists(const char* p) {
-    std::FILE* f = std::fopen(p, "rb");
-    if (f == nullptr) return false;
-    std::fclose(f);
-    return true;
-}
-
 int main(int argc, char** argv) {
     bool selftest = false;
     const char* path = "pack/full/experts.bin";
+    bool file_given = false;   // an explicitly named pack is never skipped: a typo must fail
     long long layer = 0, expert = 0;
     for (int i = 1; i < argc; ++i) {
         const std::string a = argv[i];
         if (a == "--selftest") selftest = true;
-        else if (a == "--file" && i + 1 < argc) path = argv[++i];
+        else if (a == "--file" && i + 1 < argc) { path = argv[++i]; file_given = true; }
         else if (a == "--layer" && i + 1 < argc) layer = std::atoll(argv[++i]);
         else if (a == "--expert" && i + 1 < argc) expert = std::atoll(argv[++i]);
         else { std::fprintf(stderr, "usage: expert_parity [--selftest] [--file P] [--layer N] [--expert N]\n");
                return 2; }
     }
 
-        // The full expert pack is not shipped and this box may not have one. Absent is "nothing to compare",
-        // reported as a skip naming the file; anything else wrong with it is still a failure below.
-        if (!file_exists(path)) {
-            std::printf("%s: SKIP - no expert pack at %s. Point --file at one to run this.\n", "expert_parity", path);
-            return 77;
-        }
+    // The full expert pack is not shipped and this box may not have one. Absent is "nothing to compare", so it
+    // is a skip naming the file. Anything else is a failure: present but unreadable, truncated, a directory --
+    // and a --file the operator typed, because then they asked for this to run and a typo must not go green.
+    if (!file_given && strata::testing::fixture_absent(path)) {
+        std::fprintf(stderr, "expert_parity: SKIP - no expert pack at %s. Point --file at one to run this.\n", path);
+        return 77;
+    }
     int bad = 0;
 
     // ---- the CPU must be able to run the kernel, and the report must say WHICH feature is missing
@@ -116,7 +111,7 @@ int main(int argc, char** argv) {
         std::printf("      the VNNI path cannot run here; only the scalar oracle can be exercised.\n");
         std::printf("      P2.S3's kernel check is SKIPPED, not passed.\n");
         std::printf("\nexpert_parity: 0 failures, 1 SKIPPED\n");
-        return 0;
+        return 77;   // it says SKIPPED; 0 would have ctest record a pass
     }
 
     // ---- a real blob out of the pack: layer stride is 512 experts
