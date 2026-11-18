@@ -5,7 +5,7 @@ localhost. Point your coding agent at it instead of a cloud provider.
 
 It runs **Qwen3.8-Flash-Next** on a single NVIDIA GPU. The model is far larger than any consumer
 card's memory, so most of it stays in system RAM and only the parts each token needs are streamed to
-the GPU. On a 12 GB card it answers at about 98 tokens a second.
+the GPU. On a 12 GB card it answers at about 100 tokens a second, with a 96K context.
 
 You compile it yourself. There is no installer, no download button, no web interface, no account.
 
@@ -108,10 +108,10 @@ build/bin/aegis --engine build/bin/strata \
      --native /models/IQ3_XXS/Qwen3.8-Flash-Next-GSQ-RCO-IQ3_XXS-00001-of-00002.gguf \
      --ple-gguf /models/IQ3_XXS/Qwen3.8-Flash-Next-GSQ-RCO-IQ3_XXS-00002-of-00002.gguf \
      --expert-profile data/expert-profile.bin \
-     --expert-cache auto --prefill auto --spec 4 --spec-min-p 0.5 \
+     --expert-cache auto --prefill 4096 --spec 4 --spec-min-p 0.5 \
      --mtp /models/mtp/rt \
-     --max-context 32768 --kv int8 --ple-io direct --kv-grow \
-     --pool-workers 15 --gpu 0
+     --max-context 98304 --kv int8 --ple-io direct --kv-grow \
+     --vram-reserve-mib 1152 --pool-workers 15 --gpu 0
 ```
 
 Options before `--` belong to the server; options after `--` go to the engine. `-m` is only where the
@@ -122,16 +122,28 @@ Point your agent at `http://127.0.0.1:8080/v1`. Thirteen routes are served:
 four without the `/v1` prefix, and `/completion`, `/health`, `/props`, `/tokenize`, `/detokenize`
 and `/apply-template`.
 
-Four choices in that command line matter on a 12 GB card, and differ from what you may have seen
+Six choices in that command line matter on a 12 GB card, and differ from what you may have seen
 elsewhere:
 
 - **`--mtp .../rt`**, not the directory above it. The engine looks for `dense.txt` directly inside
   the path you give, and fails at load otherwise.
 - **`--ple-io direct`** reads a large lookup table from SSD as it goes. The alternative locks that
   table in RAM, and the engine is already using about 43 GB of 62 GB.
+- **`--max-context 98304`** is not limited by the card the way you would expect. The model's trained
+  context is 262,144, and only 12 of its 48 layers are full-attention — the other 36 are linear and
+  carry a fixed-size state that does not grow with the conversation. So 96K of K/V costs **1.27 GiB**
+  at `--kv int8`, where a conventional 48-layer model of this size would want tens of gigabytes.
 - **`--kv-grow`** lets the context cache claim GPU memory as the conversation fills it, rather than
-  reserving all of it at load. A 256-token answer peaks at 11,610 MiB of 12,288, and a long conversation
-  that fills the context has reached 11,670 — close enough to the limit that there is nothing spare.
+  reserving all of it at load. It takes that memory from the expert cache as it goes: 2,973 slots at
+  load, 2,584 once 96K is genuinely full. Peak use is 11,547 MiB of 12,288.
+- **`--prefill 4096`** rather than `auto`. This one is counter-intuitive and it is the reason the
+  command line above is safe. The prompt path borrows expert-cache slots for its buffers, and the
+  borrow scales with the chunk: at `auto` (8,192 tokens) it takes 4.00 GiB, which leaves the growing
+  K/V nowhere to go but the free pool — filling the context drove free VRAM to 371 MiB, inside the
+  band where the driver starts paging GPU memory to system RAM and decode collapses. At 4,096 the
+  borrow is 2.49 GiB and the floor is **741 MiB**. It costs about 17% of prompt speed.
+  Raising `--vram-reserve-mib` does *not* fix this: 832 → 1,400 moved the floor from 385 to 371 MiB,
+  because the reserve sizes the cache at load and the borrow happens afterwards.
 - **`--gpu 0`** stated explicitly, in case a second GPU is driving your display.
 
 ## The engine is offline. Your agent is not.
@@ -230,17 +242,22 @@ against any other engine.
 
 | | |
 |---|---|
-| Load until ready | 15–18 s |
-| Reading your prompt | 1,281 tokens/s at 2K, 2,547 at 8K |
-| Writing the answer | ~98 tokens/s |
-| GPU memory at peak | 11,610 MiB of 12,288 for a short answer; 11,670 with the context full |
+| Load until ready | 14–18 s |
+| Reading your prompt | 1,180 tokens/s at 2K, 2,093 at 8K, 2,140 at 34K, 2,196 at 97K |
+| Writing the answer | ~100 tokens/s for a short answer; ~78 with the context full |
+| GPU memory at peak | 11,547 MiB of 12,288; the worst case measured left 741 MiB free |
 | System RAM at peak | 43 GB |
-| Context | 32,768 tokens with `--kv int8` |
+| Context | 98,304 tokens with `--kv int8` |
 
-Prompt reading is quoted at two lengths on purpose: the rate climbs with the prompt, because a fixed
-per-request cost is spread over more tokens. A single figure would be misleading, and an earlier
-version of this table quoted ~85 tokens/s, which was measured at a 67-token prompt and understated
-a realistic one by more than ten times.
+Prompt reading is quoted at several lengths on purpose: the rate climbs with the prompt, because a
+fixed per-request cost is spread over more tokens. A single figure would be misleading, and an
+earlier version of this table quoted ~85 tokens/s, which was measured at a 67-token prompt and
+understated a realistic one by more than ten times. Every rate here was measured with `reused=0` —
+a different prompt of the same length each time — so no prompt-cache reuse flatters them.
+
+The prompt rates are lower than the ones in `docs/speed.md`, which were taken at `--prefill auto`:
+the chunk size this command line ships costs about 17% of prompt speed to keep the memory floor
+safe, and that section explains the trade. Writing speed is unaffected by it.
 
 Turning the engine's containment off made no measurable difference — 88.5 against 89.0 tokens a
 second across several runs — so the protection costs you nothing.

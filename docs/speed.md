@@ -261,3 +261,71 @@ machine above, with no switches:
 The rate rises with the prompt because a fixed per-request cost is spread over more tokens, so a figure quoted at
 one prompt length says little about another. Measured with `reused=0` on every run — the harness sends a different
 prompt of the same length for each repeat, so no prompt-cache reuse is flattering these numbers.
+
+Those two figures were taken at `--prefill auto`. The command line the README ships sets `--prefill 4096`, which
+costs about 17% of prompt speed and buys the memory headroom the next section is about.
+
+## A 96K context on a 12 GB card, and why the limit is not where you would guess
+
+The README ships `--max-context 98304`, not because 98,304 is a tuned number but because the card turned out not
+to be the binding constraint. Two facts about this model's geometry, both from the GGUF's own metadata:
+
+- `context_length` is **262,144**. The trained context is not the limit either.
+- `full_attention_interval` is **4**, over `block_count` **48**. Only **12 layers** keep a per-token K/V. The other
+  36 are linear and carry a fixed-size state that does not grow with the conversation at all.
+
+So the K/V cost is a twelfth of what a dense 48-layer model of this size would want. At `--kv int8`, with
+`head_count_kv` 2 and `key_length` 256, a cell costs 1,056 bytes in each of the 12 layers:
+
+| context | K/V in VRAM, `--kv int8` |
+|---|---|
+| 32,768 | 0.46 GiB |
+| 98,304 | **1.27 GiB** |
+| 262,144 | ~3.3 GiB (not attempted here) |
+
+Tripling the context therefore costs under a gigabyte, and `--kv-grow` takes it from the expert cache as the
+conversation actually fills, rather than at load: 2,973 slots at load, 2,584 once 96K is genuinely full. The
+engine prints both numbers.
+
+### The constraint is the prompt path's borrow, not the K/V
+
+The prompt path borrows expert-cache slots for its buffers and refills them afterwards (`--no-prefill-borrow`
+reserves them for the session instead). The borrow scales with the chunk, and at `--prefill auto` on this pack
+that is 8,192 tokens and **4.00 GiB** — which leaves a growing K/V nowhere to go but the free pool. Filling a 96K
+context drove free VRAM to **371 MiB**, inside the band where the driver can page GPU memory to system RAM and
+decode collapses to a few tokens a second. The engine warns below 512 MiB and it is right to.
+
+`--vram-reserve-mib` does not fix this, which is the counter-intuitive part and worth recording:
+
+| `--vram-reserve-mib` | `--prefill` | expert slots at load | free VRAM, 96K context full |
+|---|---|---|---|
+| 832 | auto | 3,165 | 385 MiB |
+| 1,400 | auto | 2,821 | 371 MiB |
+| 1,152 | **4096** | 2,973 | **741 MiB** |
+
+Raising the reserve by 568 MiB moved the floor by −14 MiB. The reserve sizes the expert cache *at load*; the borrow
+happens per request afterwards, so a bigger reserve just hands the borrow more to take. Halving the chunk halves
+the borrow — 1,531 slots, 2.49 GiB — and doubles the floor.
+
+### What the shipped command line measures
+
+Same machine as above, with the engine's own default switches on, through the HTTP API:
+
+| | |
+|---|---|
+| prompt, 2,047 tokens | 1,180 tok/s |
+| prompt, 8,581 tokens | 2,093 tok/s |
+| prompt, 34,157 tokens | 2,140 tok/s |
+| prompt, 96,966 tokens | 2,196 tok/s |
+| decode, 256-token answers | 100.2, 105.8, 107.6 → **median 105.8 tok/s** |
+| decode, 96K context full | ~78 tok/s |
+| free VRAM at worst | 741 MiB of 12,288 |
+
+Every prompt rate is a `reused=0` run on unique text. The decode figures are **not** comparable to the
+`89.60`/`98.24` pair at the top of this file: those restart the engine for every run and reply to one fixed prompt,
+which is the protocol an A/B needs, and these do not restart. They are quoted only to show the shipped line is not
+slower in ordinary use. Retrieval was checked rather than assumed — a fact planted mid-document was read back
+correctly from prompts of 37,593, 75,092, 93,758, 97,649 and 101,499 tokens.
+
+`--max-context 102400` also runs and retrieves correctly, but its floor is 327 MiB even at `--prefill 4096`, so
+98,304 is what the README quotes.
