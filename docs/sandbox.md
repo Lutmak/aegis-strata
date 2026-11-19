@@ -17,7 +17,7 @@ Derived mechanically, not by guessing. Three sources, each re-runnable:
 | Path | Where | Why |
 |---|---|---|
 | `/proc/self/{exe,stat,status,statm,io,task,numa_maps}` | `src/prefill/mmq_kq_loader.cpp`, `src/program/generate.cpp`, `src/platform/memory.cpp`, `include/strata/platform/aux_cpus.hpp` | finds `libstrata_kq.so` beside the exe; RSS/IO/thread accounting |
-| `/proc/meminfo`, `/proc/buddyinfo`, `/proc/sys/vm/nr_hugepages` | `src/core/expert_cache.cpp:49`, `src/core/pinned.cu:62,254`, `src/core/expert_source.cpp:453,2809` | expert-cache sizing, hugepage planning |
+| `/proc/meminfo`, `/proc/buddyinfo`, `/proc/sys/vm/nr_hugepages` | `src/core/expert_cache.cpp:49`, `src/core/pinned.cu:62,254`, `src/core/expert_source.cpp#bool free_memory_bytes`, `src/core/expert_source.cpp#detail::page_cache_hint` | expert-cache sizing, hugepage planning |
 | `/sys/devices/system/cpu/*/topology/*`, `/sys/devices/system/node/*` | `include/strata/platform/aux_cpus.hpp`, `src/kernels/cpu/pool.cpp`, `src/core/expert_source.cpp` | CPU/NUMA placement of the expert worker pool |
 | `/sys/fs/cgroup/*`, `/sys/dev/block/<maj>:<min>`, `/sys/kernel/mm/transparent_hugepage/enabled` | `include/strata/core/conversation_memory.hpp`, `src/program/generate.cpp`, `src/core/pinned.cu` | memory limits, rotational-disk detection for `--ple-io` |
 | `/dev/shm` | `src/core/pinned.cu:89`, `--shared-expert-arena` (`src/program/generate.cpp#--shared-expert-arena`) | MAP_SHARED arena |

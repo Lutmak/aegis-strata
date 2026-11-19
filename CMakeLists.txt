@@ -544,7 +544,7 @@ if(STRATA_ENABLE_CUDA OR STRATA_ENABLE_HIP)
     src/core/remote_expert_opt.cu
     src/core/expert_cache.cpp src/core/native_head.cpp src/core/native_dense.cpp src/core/verify.cpp src/core/mtp.cpp
     src/core/conversation_snapshot.cpp src/core/conversation_state.cpp src/core/conversation_memory.cpp src/core/peer_experts.cpp
-    src/core/arch_defaults.cpp src/core/nv_defaults.cpp src/core/vmm.cpp src/core/conversation_file.cpp)
+    src/core/arch_defaults.cpp src/core/nv_defaults.cpp src/core/tail_skip.cpp src/core/vmm.cpp src/core/conversation_file.cpp)
   target_include_directories(strata_engine PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
   target_link_libraries(strata_engine PUBLIC strata_core strata_kernels strata_kernels_cpu ${_strata_gpu_runtime_target})
   if(STRATA_BUILD_TESTS AND STRATA_ENABLE_CUDA AND NOT STRATA_HIP_GFX906)
@@ -2009,6 +2009,13 @@ if(STRATA_FRONTEND AND STRATA_NATIVE_EXPERTS)
   add_executable(nv_defaults_test EXCLUDE_FROM_ALL src/core/nv_defaults_test.cpp src/core/nv_defaults.cpp)
   target_include_directories(nv_defaults_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
   target_compile_features(nv_defaults_test PRIVATE cxx_std_20)
+
+  # The route tail skip's decision (strata/core/tail_skip.hpp): the one setting here that computes less of the
+  # model rather than reordering the same arithmetic, so whether it is on is an owner's decision and the decision
+  # is pinned by a test. Here beside nv_defaults_test for the same reason: no GPU, so `make test` runs it anywhere.
+  add_executable(tail_skip_test EXCLUDE_FROM_ALL src/core/tail_skip_test.cpp src/core/tail_skip.cpp)
+  target_include_directories(tail_skip_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+  target_compile_features(tail_skip_test PRIVATE cxx_std_20)
 
   # The MMQ row table's over-read margin (strata/prefill/mmq_ids_margin.hpp): every index llama.cpp's stream-k fixup
   # and main kernel can read stays inside the table. Header-only, no GPU, so it belongs here with nv_defaults_test

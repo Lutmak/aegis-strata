@@ -231,6 +231,61 @@ check $(grep -q "the engine did not respond" "$WEDGE_LOG" && echo 0 || echo 1) "
 wait_exit $WEDGE_PID 20; wrc=$WAIT_RC
 check $([ "$wrc" = 1 ] && echo 0 || echo 1) "server exited $wrc (1 = restart me) after giving up on the engine"
 
+# /props reports the route tail skip the ENGINE decided on, not what the command line asked for. The two can
+# differ -- the engine refuses the skip under --batch slots and with a helper GPU -- and this is the only way an
+# operator can ask a running server how much of the model it is actually computing. Three cases, because a field
+# wired to a constant would pass any one of them: the key absent (an engine older than the flag -> null), 0, and 7.
+TS_PORT=$((PORT + 4)); TS_URL=http://127.0.0.1:$TS_PORT
+TS_LOG=$(mktemp "${TMPDIR:-/tmp}/us2-e2e-tailskip-XXXXXX")
+# The main server above runs with FAKE_TAIL_SKIP unset, so it is the "engine said nothing" case.
+check $([ "$(curl -s "$URL/props" | j 'd["tail_skip"]')" = null ] && echo 0 || echo 1) \
+      "/props tail_skip is null when the engine does not report one"
+ts_n=0
+for want in 0 7; do
+    FAKE_TAIL_SKIP=$want "$BIN" --engine "$HERE/fake-engine.py" -m "$MODEL" --host 127.0.0.1 --port "$TS_PORT" \
+        --alias fake -- --max-context 4096 > "$TS_LOG" 2>&1 &
+    TS_PID=$!
+    if ready_or_fail $TS_PID "$TS_PORT" "tail-skip server ($want)"; then
+        got=$(curl -s "$TS_URL/props" | j 'd["tail_skip"]')
+        check $([ "$got" = "$want" ] && echo 0 || echo 1) "/props tail_skip is $want when the engine reports $want (got $got)"
+        # Asking for less than the whole model is worth a line in the log, so an operator reading a server's output
+        # after the fact can see it. 0 must NOT produce that line.
+        if [ "$want" = 7 ]; then
+            check $(grep -q "not the same model" "$TS_LOG" && echo 0 || echo 1) "server warns when the engine skips experts"
+        else
+            check $(grep -q "not the same model" "$TS_LOG" && echo 1 || echo 0) "server stays quiet when nothing is skipped"
+        fi
+        ts_n=$((ts_n + 1))
+    fi
+    kill $TS_PID 2>/dev/null; wait $TS_PID 2>/dev/null
+done
+check $([ "$ts_n" = 2 ] && echo 0 || echo 1) "both tail_skip servers were reached ($ts_n of 2)"
+
+# A value the engine should never send, because the value crosses a process boundary and --engine points at
+# whatever the operator names -- this suite substitutes a different engine itself. std::atoi used to read these:
+# "abc" and "" became 0, which this server reports as "every routed expert is computed", so a misread became a
+# promise about the model; and "-3" became null, "this engine did not say", about an engine that did say. Both
+# directions are now refused, reported as unknown, and logged as an error rather than guessed.
+ts_bad=0
+for bad in abc 7x '  7' -3 99 0x7; do
+    FAKE_TAIL_SKIP="$bad" "$BIN" --engine "$HERE/fake-engine.py" -m "$MODEL" --host 127.0.0.1 --port "$TS_PORT" \
+        --alias fake -- --max-context 4096 > "$TS_LOG" 2>&1 &
+    TS_PID=$!
+    if ready_or_fail $TS_PID "$TS_PORT" "tail-skip server (bad: $bad)"; then
+        got=$(curl -s "$TS_URL/props" | j 'd["tail_skip"]')
+        check $([ "$got" = null ] && echo 0 || echo 1) \
+              "/props tail_skip is null, not a guess, when the engine reports '$bad' (got $got)"
+        check $(grep -q "which is not a rank 0-9" "$TS_LOG" && echo 0 || echo 1) \
+              "server logs an error for tail_skip='$bad' instead of guessing"
+        check $(grep -q "not the same model" "$TS_LOG" && echo 1 || echo 0) \
+              "server does not warn about skipping for the unparseable tail_skip='$bad'"
+        ts_bad=$((ts_bad + 1))
+    fi
+    kill $TS_PID 2>/dev/null; wait $TS_PID 2>/dev/null
+done
+check $([ "$ts_bad" = 6 ] && echo 0 || echo 1) "all six malformed tail_skip values were tried ($ts_bad of 6)"
+scrub "$TS_LOG"
+
 # An ordinary shutdown exits 0. This is the other half of the wedge check above: the two engine-failure paths exit
 # non-zero on purpose so a unit with Restart=on-failure brings the pair back, which only works if being ASKED to
 # stop is distinguishable from failing. It was not -- strata_context::terminate() quits the engine itself, the

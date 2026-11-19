@@ -164,7 +164,7 @@ to an arbitrary path fails even if some code path attempts it.
 
 Unrelated to disclosure but relevant to verifying any of this: the engine's **decode is not
 reproducible run to run**. Two runs of the same binary with the same flags at temperature 0 give
-different answers, and still do with `STRATA_FREEZE_EXPERTS=1` and `STRATA_ROUTE_TAIL_SKIP=0`;
+different answers, and still do with `STRATA_FREEZE_EXPERTS=1` and the route tail skip off (its default);
 prefill-dominated requests are identical every time, so the variance is in decode, which is where
 speculative decoding runs. Output equality therefore cannot be used to check that a change to this
 engine was behaviour-preserving.

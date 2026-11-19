@@ -1,6 +1,7 @@
 // src/core/expert_source.cpp - the adapter.  See the header for the three clauses of the contract.
 #include "strata/core/expert_source.hpp"
 #include "strata/core/foresight_swap.hpp"
+#include "strata/core/tail_skip.hpp"   // tail_skip_rank(): the dispatch below reads it; the module owns it
 #include "strata/core/on_device.hpp"
 #include "strata/platform/aux_cpus.hpp"
 #include "strata/core/remote_experts.hpp"
@@ -3763,22 +3764,10 @@ constexpr int64_t kMaxWindowEntries = 128;
 static_assert(strata::kernels::cpu::MAXT * 10 <= kMaxWindowEntries, "a verify window's entries overflow the tables");
 }  // namespace
 
-namespace {
-// STRATA_ROUTE_TAIL_SKIP: the rank from which a missed expert that every token of the window routes that low is skipped.  An
-// explicit environment value is read once; the serve start-up (generate.cpp) sets the CUDA default where it applies.
-std::atomic<int> g_tail_skip_rank{-1};   // -1: not resolved yet
-}  // namespace
-int tail_skip_rank() {
-    int r = g_tail_skip_rank.load(std::memory_order_relaxed);
-    if (r < 0) {
-        const char* v = std::getenv("STRATA_ROUTE_TAIL_SKIP");
-        r = v != nullptr ? std::atoi(v) : 0;
-        r = r > 0 && r < 10 ? r : 0;
-        g_tail_skip_rank.store(r, std::memory_order_relaxed);
-    }
-    return r;
-}
-void set_tail_skip_rank(int r) { g_tail_skip_rank.store(r > 0 && r < 10 ? r : 0, std::memory_order_relaxed); }
+// The rank the dispatch below reads lives in src/core/tail_skip.cpp, with the decision that produces it and the
+// bound they both have to agree on.  It used to live here, and the clamp here silently disagreeing with the
+// decision there was reachable in principle: a decision of 10 announced "ON at rank 10" while this clamped it to
+// 0 and skipped nothing.  One translation unit owns the rank now, and a GPU-free test covers it.
 
 void expert_pool_dispatch_multi(ExpertDispatch& d, const float* x_f, const int32_t* ids, int64_t n_tok, int64_t k,
                                 float* out) {
@@ -3847,7 +3836,7 @@ void expert_pool_dispatch_multi(ExpertDispatch& d, const float* x_f, const int32
                     !(d.peer != nullptr && d.peer->has(d.layers, e)) && !helper_holds(e)) ++nmiss;
             }
         }
-        // STRATA_ROUTE_TAIL_SKIP=R (default 7 on CUDA serve, =0 off; changes the output): a missed expert that EVERY token of the window routes
+        // --tail-skip R (off unless asked for; it changes the output): a missed expert that EVERY token of the window routes
         // only at rank >= R (the smallest weights of the top-10) is neither copied nor computed; its contribution is
         // zero, without renormalisation (the others keep the weight the router gave them).  Less PCIe and CPU work.
         const int tail_rank = tail_skip_rank();
@@ -3887,7 +3876,7 @@ void expert_pool_dispatch_multi(ExpertDispatch& d, const float* x_f, const int32
             const int32_t e = ids[i0];
             int kd = -1;
             unsigned long long ptr = 0;
-            if (skip_d[q]) {                       // STRATA_ROUTE_TAIL_SKIP: neither copied nor computed
+            if (skip_d[q]) {                       // --tail-skip: neither copied nor computed
                 for (int64_t i = i0; i < n; ++i)
                     if (first_of[i] == i0) kind[i] = -2;
                 continue;
@@ -3989,7 +3978,7 @@ void expert_pool_dispatch_multi(ExpertDispatch& d, const float* x_f, const int32
     const bool gpu_zeroes_hits = (d.plan != nullptr && n <= kMaxWindowEntries && n <= d.plan->cap && dec_batch && !device_plan);
     bool any_cpu = false;
     for (int64_t i = 0; i < n; ++i)
-        if (kind[i] == -1) { any_cpu = true; break; }   // -2: skipped (STRATA_ROUTE_TAIL_SKIP), no work
+        if (kind[i] == -1) { any_cpu = true; break; }   // -2: skipped (--tail-skip), no work
     if (d.dres_check != nullptr && any_cpu) {   // STRATA_ADAPT_CHECKRES
         bool published = false;
         for (int64_t i = 0; i < n && !published; ++i)
@@ -4034,7 +4023,7 @@ void expert_pool_dispatch_multi(ExpertDispatch& d, const float* x_f, const int32
                 d.fail_expert = e;
                 return;
             }
-            if (kind[i] == -2) {            // STRATA_ROUTE_TAIL_SKIP: a skipped tail expert contributes zero
+            if (kind[i] == -2) {            // --tail-skip: a skipped tail expert contributes zero
                 std::memset(row, 0, (size_t) H * sizeof(float));
                 ++d.tail_skipped;
                 continue;

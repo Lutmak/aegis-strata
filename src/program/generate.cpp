@@ -18,6 +18,7 @@
 #include "strata/platform/memory.hpp"
 #include "strata/core/arch_defaults.hpp"
 #include "strata/core/nv_defaults.hpp"
+#include "strata/core/tail_skip.hpp"
 #include "strata/kernels/gfx_arch.hpp"
 #include "strata/core/dma_batch.hpp"
 #include "strata/core/device.hpp"
@@ -661,6 +662,12 @@ struct Options {
     std::string spec_follow;
     /// Per verify window: a line with its size, a hash of its final residual rows and its argmaxes.
     std::string window_hashes;
+    /// --tail-skip N (0 = off, the default): the route tail skip's rank.  A missed expert that every token of a
+    /// verify window routes at rank N or lower is neither copied nor computed, so the token is answered by fewer
+    /// than its ten routed experts.  It is the one setting here that computes less of the model instead of
+    /// reordering the same arithmetic, so it is off until it is asked for (strata/core/tail_skip.hpp).
+    int tail_skip = 0;
+    bool tail_skip_set = false;   ///< --tail-skip was passed, so 0 means "off, and I said so"
     /// Plan v0.3 P6: the MTP draft layer's runtime directory (tools/mtp_rt.py); drafts come from it.
     std::string mtp;
     int64_t mtp_window = 32768;   ///< the draft layer attends to the last N cells (0 = every cell)
@@ -954,6 +961,12 @@ void usage() {
                  "  --window-hashes PATH per verify window, a line with its index, position, size, a 64-bit hash of\n"
                  "                       its final residual rows and its argmaxes: two builds that do the same\n"
                  "                       arithmetic write the same file (use with --spec-follow, --adapt-every 0)\n"
+                 "  --tail-skip N        the route tail skip's rank, 0-9 (default 0 = off).  A missed expert that\n"
+                 "                       every token of a verify window routes at rank N or lower is neither copied\n"
+                 "                       nor computed: its contribution is zero and the other experts keep the\n"
+                 "                       router's weights, so the token is answered by fewer than its ten experts.\n"
+                 "                       Faster on a card that misses experts, and NOT the same model; 7 is the\n"
+                 "                       only rank anyone has measured.  The engine prints what it decided\n"
                  "  --gpu-stages         R0.9: capture the layer as three graphs (mixer / ffn+router / post)\n"
                  "                       and time them from OUTSIDE the capture.  The per-stage table on the\n"
                  "                       real graph that --stage-timing cannot give.  Prints and exits.\n"
@@ -1898,6 +1911,20 @@ static bool pcie_auto_split_ok() {
     return on;
 }
 
+/// The two environment variables the route tail skip used to be configured by. They decide nothing now, and an
+/// operator who still has one exported -- following any document written before --tail-skip existed -- would
+/// otherwise get the opposite of what they asked for in silence. Saying so costs one line and only when one is set.
+static void tail_skip_env_notice() {
+    // "strata:" and not "strata serve:": this is called from the one-shot path too, where every other line is
+    // prefixed "strata generate:" and claiming to be the server was simply wrong.
+    for (const char* name : {"STRATA_ROUTE_TAIL_SKIP", "STRATA_TAIL_SKIP_MAX_CACHED"}) {
+        const char* v = std::getenv(name);
+        if (v != nullptr)
+            std::fprintf(stderr, "strata: %s=%s is set and is NOT read; the route tail skip is --tail-skip N "
+                                 "now, and the line above says what this engine decided\n", name, v);
+    }
+}
+
 // 0.1.43: the HIP defaults of the decode speed push (route tail skip, measured PCIe share) were measured on gfx1201 (Radeon AI PRO
 // R9700) and apply on gfx1200 / gfx1201 only; every other AMD part (gfx11, gfx906, ...) keeps its earlier behaviour.  CUDA: always true.
 [[maybe_unused]] static bool decode_defaults_arch_ok() {
@@ -2457,6 +2484,18 @@ static int run(int argc, char** argv) {
         else if (a == "--spec-corrupt") o.spec_corrupt = std::atoi(next("--spec-corrupt"));
         else if (a == "--spec-follow") o.spec_follow = next("--spec-follow");
         else if (a == "--window-hashes") o.window_hashes = next("--window-hashes");
+        else if (a == "--tail-skip") {
+            // Parsed strictly and refused loudly.  `atoi` would read "--tail-skip seven" as 0 and "--tail-skip 7x"
+            // as 7, and both directions of that misread are bad: one silently hands back the complete model while
+            // the operator believes they asked for speed, the other silently hands back less of it.
+            const char* tsv = next("--tail-skip");
+            o.tail_skip_set = true;
+            if (!strata::core::parse_tail_skip(tsv, o.tail_skip)) {
+                std::fprintf(stderr, "--tail-skip: expected a rank 0-9 (0 = off, 7 is the measured one), got \"%s\"\n",
+                             tsv);
+                return 2;
+            }
+        }
         else if (a == "--mtp") o.mtp = next("--mtp");
         else if (a == "--mtp-window") o.mtp_window = std::atoll(next("--mtp-window"));
         else if (a == "--pcie-frac") o.pcie_frac = std::atof(next("--pcie-frac"));
@@ -6030,12 +6069,15 @@ static int run(int argc, char** argv) {
         // token 0). That fault was fixed long since (native_expert_parity, expert_parity, the grouped kernels'
         // tests), and the warning outlived it (issue #23). What remains is rounding: a GPU expert and the CPU's
         // compute the same quantized expert with different float order, so a near-tie can flip. Measured teacher-
-        // forced on 2,557 tokens (bench/results/2026-09-27-cache-parity): 95-98% same top-1, and perplexity equal
+        // forced on 2,557 tokens, upstream, in a results directory this fork does not carry: 95-98% same top-1,
+        // and perplexity equal
         // (on - off = -0.005 +- 0.005 nats). Neither output is more correct than the other.
         std::fprintf(stderr,
                      "strata generate: the GPU computes the experts in the cache; it rounds differently from the CPU,\n"
-                     "                 so a reply can differ slightly from a run without the cache (same quality:\n"
-                     "                 bench/results/2026-09-27-cache-parity).\n");
+                     "                 so a reply can differ slightly from a run without the cache. Same quality,\n"
+                     "                 measured upstream on 2,557 teacher-forced tokens: 95-98%% the same top-1\n"
+                     "                 token and equal perplexity, so neither of the two is the more correct one.\n"
+                     "                 Not re-measured here; the results it was taken from are not in this fork.\n");
         if (o.expert_cache_per_layer) {
             int64_t lo = 0, hi = 0;
             xcache.layer_slot_range(0, lo, hi);
@@ -9372,53 +9414,24 @@ static int run(int argc, char** argv) {
         drive.d.pcie_num = std::max(0, std::min(256, (int) (o.pcie_frac * 256.0 + 0.5)));
         const bool all_experts_resident = !host_res.empty() &&
             std::all_of(host_res.begin(), host_res.end(), [](int32_t r) { return r >= 0; });
-        // STRATA_ROUTE_TAIL_SKIP: ON BY DEFAULT on CUDA builds (owner decision, 0.1.42) and on HIP gfx1200/gfx1201 (0.1.43): a missed expert that every token of
-        // a verify window routes at rank 7 or lower is neither copied nor computed (answers differ slightly from 0.1.41,
-        // KL ~0.003-0.006; docs/DETAILS.md).  =0 restores 0.1.41's bytes.  Nothing to do, so no default and no line, when every
-        // expert is in VRAM; off with --batch slots (a window then mixes requests, and one request's skip would depend on
-        // another's tokens) and, as in the dispatch, with a peer or helper GPU.  A layer split is fine: each stage skips by itself.
+        // The route tail skip (--tail-skip N; strata/core/tail_skip.hpp), announced in one line whatever it is.
+        //
+        // It arrived here as a CUDA default, at rank 7, with a cluster of rules deciding when to withhold it: a
+        // 90%-cached ceiling, an NVFP4 branch, and an environment variable to move the ceiling. All of that existed
+        // to pick the configurations where an unasked-for approximation was a good trade, and none of it is needed
+        // once the operator asks, so it is gone. What remains are the two configurations where the dispatch CANNOT
+        // honour a request, which the decision reports rather than silently ignoring.
         {
-            const char* tse = std::getenv("STRATA_ROUTE_TAIL_SKIP");
-            // #1884: with nearly every expert in the GPU cache (V100 32 GB, Coder IQ1_M: 94.8% of the experts, 99.9% decode hits) the few
-            // misses are cheap and the skip costs more draft acceptance (70.1% -> 68.2%) than it saves: -1..2% decode.  No default then.
-            size_t cached_experts = 0;
-            for (int32_t r : host_res) cached_experts += r >= 0 ? 1 : 0;
-            // (STRATA_TAIL_SKIP_MAX_CACHED=<percent>, default 90, moves the line; 101 = never).  0.1.43: 60 on a HIP layer split, where
-            // 2x R9700 (5 pairs, skip on vs off): Q2_0 story -6.2% at 70% cached, -1.8% at 60%; IQ3_S +6..15% at 44-52%, about 0 at 60%.
-#if defined(STRATA_USE_HIP)
-            const double max_cached_default = n_stages > 1 ? 0.60 : 0.90;
-#else
-            const double max_cached_default = 0.90;
-#endif
-            const char* mcs = std::getenv("STRATA_TAIL_SKIP_MAX_CACHED");
-            const double max_cached = mcs != nullptr && mcs[0] != 0 ? std::atof(mcs) / 100.0 : max_cached_default;
-            const bool nearly_all_cached = !host_res.empty() && !all_experts_resident &&
-                                           (double) cached_experts >= max_cached * (double) host_res.size();
-            // NVFP4 experts (any layer): no default (sergqwer/strata-nvfp4 c83625c3).  On the fork's qwen-nvfp4-gptq pack the
-            // skip moved the answers by teacher-forced KL 0.035 against it off - as much as the GPTQ quantization's own error
-            // against an all-Q8_0 reference (0.038) - for +11.5% decode (RTX 5090).  STRATA_ROUTE_TAIL_SKIP=7 opts in.
-            bool nvfp4_experts = false;
-            if (native_pack)
-                for (const auto& f : strata::kernels::cpu::expert_layout().fmt)
-                    nvfp4_experts = nvfp4_experts || f.gu_type == strata::kernels::cpu::kNvfp4Type ||
-                                    f.d_type == strata::kernels::cpu::kNvfp4Type;
-            const bool tail_default_path = tse == nullptr && !all_experts_resident && !nearly_all_cached && o.batch == 0 &&
-                                           decode_defaults_arch_ok() &&
-                                           o.peer_device < 0;
-            const bool tail_default_ok = tail_default_path && !nvfp4_experts;
-            if (tail_default_path && nvfp4_experts)
-                std::fprintf(stderr, "strata serve: STRATA_ROUTE_TAIL_SKIP is off by default with NVFP4 experts (it moved an NVFP4 "
-                                     "pack's answers by about as much as its quantization does); STRATA_ROUTE_TAIL_SKIP=7 turns it on\n");
-            if (tse == nullptr && nearly_all_cached && o.batch == 0 && o.peer_device < 0 && decode_defaults_arch_ok())
-                std::fprintf(stderr, "strata serve: STRATA_ROUTE_TAIL_SKIP is off by default: %.1f%% of the experts are in the GPU cache, so "
-                                     "few are missed and skipping them costs more draft acceptance than it saves; "
-                                     "STRATA_ROUTE_TAIL_SKIP=7 turns it on\n", 100.0 * (double) cached_experts / (double) host_res.size());
-            if (tail_default_ok) strata::core::set_tail_skip_rank(7);
-            if (strata::core::tail_skip_rank() > 0 && !all_experts_resident)
-                std::fprintf(stderr, "strata serve: STRATA_ROUTE_TAIL_SKIP=%d is ON%s: a missed expert that every token of a verify window routes at rank %d or "
-                                     "lower is skipped (+10..20%% decode on 12-16 GB cards that miss experts, answers differ slightly from 0.1.41); "
-                                     "STRATA_ROUTE_TAIL_SKIP=0 turns it off\n", strata::core::tail_skip_rank(),
-                             tse == nullptr ? " (default)" : "", strata::core::tail_skip_rank());
+            strata::core::TailSkipRequest req;
+            req.rank = o.tail_skip;
+            req.explicitly_set = o.tail_skip_set;
+            req.batch_slots = o.batch;
+            req.peer_or_helper = o.peer_device >= 0 || o.expert_cache_remote[0] > 0 ||
+                                 o.expert_cache_remote[1] > 0 || o.expert_cache_remote[2] > 0;
+            const strata::core::TailSkipDecision ts = strata::core::decide_tail_skip(req);
+            strata::core::set_tail_skip_rank(ts.rank);
+            std::fprintf(stderr, "strata serve: %s\n", strata::core::tail_skip_line(ts).c_str());
+            tail_skip_env_notice();
         }
         if (o.adapt_every > 0 && o.adapt_swaps > 0 && !all_experts_resident)
             drive.d.usage.assign((size_t) (g.n_layers * g.n_expert), 0.0f);
@@ -10461,7 +10474,7 @@ static int run(int argc, char** argv) {
                         "mtp_max=%d lookup=%d vram_free_mib=%lld cvec=%s arena_mib=%lld pool_workers=%d pcie_frac=%.2f "
                         "spec_min_p=%.2f conversation_cache_mib=%lld conversation_cache_slots=%d "
                         "conversation_cache_min_free_mib=%lld conversation_cache_min_tokens=%lld "
-                        "tail_role_token=%lld vram_elastic=%d "
+                        "tail_role_token=%lld vram_elastic=%d tail_skip=%d "
                         "prefill_cap=%lld prefill_stages=%d stream_all_min=%lld prefill_pipe=%g%s engine=" STRATA_VERSION "\n",
                         (long long) o.max_context, o.kv.c_str(),
                         (long long) (g.n_qsa_layers() > 0 && ss.qsa_states[ss.qsa_primary()].kv_mode == 1
@@ -10475,6 +10488,9 @@ static int run(int argc, char** argv) {
                         o.spec_min_p, (long long) o.conversation_cache_mib, o.conversation_cache_slots,
                         (long long) o.conversation_cache_min_free_mib, (long long) o.conversation_cache_min_tokens,
                         (long long) o.tail_role_token, xcache.segmented() ? 1 : 0,
+                        // the route tail skip as DECIDED, not as asked for: the server reports this on
+                        // /props, and what a reader needs there is how much of the model ran.
+                        strata::core::tail_skip_rank(),
                         // the prompt path: its chunk cap (the VRAM command's relend can lower it later), the stages a
                         // prompt flows through, the chunk size from which a chunk streams every expert, --prefill-pipe
                         (long long) o.prefill_chunk, sp.stage_count(),
@@ -14753,7 +14769,7 @@ static int run(int argc, char** argv) {
                              100.0 * (double) req_hits / (double) req_look,
                              (long long) req_hits, (long long) req_look, off);
             }
-            if (drive.d.tail_experts > 0)   // STRATA_ROUTE_TAIL_SKIP, cumulative
+            if (drive.d.tail_experts > 0)   // --tail-skip, cumulative
                 std::fprintf(stderr, "strata serve: route tail skip: %lld missed experts skipped (%lld entries) since the "
                                      "start\n", (long long) drive.d.tail_experts, (long long) drive.d.tail_skipped);
             // the resident RAM mode, cumulative: experts read from experts.bin since the copy was made (what the plain
@@ -14889,6 +14905,27 @@ static int run(int argc, char** argv) {
         std::_Exit(0);
 #endif
         return 0;
+    }
+
+    // The route tail skip, for a one-shot run as for --serve.  It belongs HERE -- before the prompt is read, in the
+    // one-shot path's own scope -- and not inside the speculative-decoding branch below, where it was first put.
+    // `--spec` defaults to 0, so `spec_pos` stays 0 and that branch does not run for a plain `strata ... -p ...`:
+    // the rank was never set, no line was printed in either direction, and `tail_skip_env_notice()` never ran, so
+    // `--tail-skip 7` was accepted and silently did nothing.  That is the same defect this change exists to remove,
+    // one level down -- an arm that did not skip while its operator believed it did -- and the claims that every
+    // outcome is announced (tail_skip.hpp, docs/speed.md, the usage text) were false on that path.  Unconditional
+    // here, and before any dispatch, so the rank the operator asked for is the rank the prompt is read under too.
+    {
+        strata::core::TailSkipRequest req;
+        req.rank = o.tail_skip;
+        req.explicitly_set = o.tail_skip_set;
+        req.batch_slots = o.batch;
+        req.peer_or_helper = o.peer_device >= 0 || o.expert_cache_remote[0] > 0 ||
+                             o.expert_cache_remote[1] > 0 || o.expert_cache_remote[2] > 0;
+        const strata::core::TailSkipDecision ts = strata::core::decide_tail_skip(req);
+        strata::core::set_tail_skip_rank(ts.rank);
+        std::fprintf(stderr, "strata generate: %s\n", strata::core::tail_skip_line(ts).c_str());
+        tail_skip_env_notice();
     }
 
     // ---- plan v0.3 P5: the prompt's conditioning positions [0, n_prompt - 1) in batched chunks.  The token loop
@@ -15726,6 +15763,13 @@ static int run(int argc, char** argv) {
         if (!follow.empty())
             std::printf("%-24s %lld of %lld emitted tokens differ from the argmax\n", "follow",
                         (long long) follow_differ, (long long) follow_emitted);
+        // The route tail skip's own count, in a one-shot run as well as under --serve. A measurement of this
+        // setting has to be able to prove the skip fired, because an arm that silently did not skip anything
+        // produces the same shape of output as one that skipped and cost nothing, and the two mean opposite
+        // things. A rate alone cannot tell them apart; this line can.
+        std::printf("%-24s rank %d, %lld missed experts skipped (%lld routed entries)\n", "route tail skip",
+                    strata::core::tail_skip_rank(), (long long) drive.d.tail_experts,
+                    (long long) drive.d.tail_skipped);
         if (o.spec_min_p > 0.0) {
             std::printf("%-24s", "window sizes");
             for (size_t i = 1; i < window_hist.size(); ++i) std::printf(" T%zu:%lld", i, (long long) window_hist[i]);

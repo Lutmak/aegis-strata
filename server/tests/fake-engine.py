@@ -33,7 +33,10 @@ def say(s):
 
 
 env = os.environ.get
-say("INFO engine=fake batch_slots=0")
+# FAKE_TAIL_SKIP: what this engine claims it decided about the route tail skip, or absent to say nothing at all --
+# which is what an engine older than the flag does, and the case /props has to report as null rather than as 0.
+_tail_skip = env("FAKE_TAIL_SKIP")
+say("INFO engine=fake batch_slots=0" + ("" if _tail_skip is None else " tail_skip=" + _tail_skip))
 say("READY %s%s" % (env("FAKE_CONTEXT", "4096"), "" if env("FAKE_NO_STOP") else " stop"))
 
 first = True

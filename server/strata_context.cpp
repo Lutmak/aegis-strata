@@ -242,6 +242,11 @@ struct strata_context_impl {
     aegis::SandboxPlan sandbox;              // outlives the fork: the child reads it after fork()
     bool                     sandbox_enabled = true;   // --no-sandbox: the REQUEST
     SandboxState             sandbox_state = SandboxState::Off;   // the OUTCOME, set after the engine starts
+    // The route tail skip the engine DECIDED on, straight out of its INFO line; -1 = it did not say. Reported on
+    // /props beside `sandbox`, and for the same reason: both are things the operator asked for which the engine
+    // can end up not doing, so what a reader needs is the outcome and not a copy of the command line. The server
+    // must not infer it from the engine's argv -- that would be a second copy of the fact, free to drift.
+    int                      tail_skip = -1;
     std::vector<std::string> sandbox_allow_read;       // --sandbox-allow-read
     std::vector<std::string> sandbox_allow_write;      // --sandbox-allow-write
     long long                n_ctx = 0;
@@ -1547,6 +1552,34 @@ bool strata_context::load(common_params & params, std::string & err) {
     for (const auto & kv : I.engine.info()) {
         LOG_INF("engine info: %s=%s\n", kv.first.c_str(), kv.second.c_str());
     }
+    {
+        const auto it = I.engine.info().find("tail_skip");
+        if (it != I.engine.info().end()) {
+            // One decimal digit, 0 to 9, and nothing else -- parsed here rather than with std::atoi, which
+            // reads "7x" as 7 and both "" and "abc" as 0.  Zero is what this server reports as "every routed
+            // expert is computed", so an unparseable value became a promise about the model, which is the one
+            // direction a misread must never go; and a negative one became `null`, meaning "this engine never
+            // said", about an engine that did say.  The value crosses a process boundary, so it is checked
+            // even though the child is normally our own binary: --engine names whatever the operator points
+            // it at, and the test suite itself substitutes a different one.
+            //
+            // src/core/tail_skip.cpp#parse_tail_skip is the same four lines, and is deliberately NOT reused:
+            // this server links no engine code, and that boundary is worth more than the duplication.
+            const std::string & v = it->second;
+            if (v.size() == 1 && v[0] >= '0' && v[0] <= '9') {
+                I.tail_skip = v[0] - '0';
+            } else {
+                LOG_ERR("the engine reported tail_skip=%s, which is not a rank 0-9; reporting it as unknown on "
+                        "/props rather than guessing, because guessing 0 would claim the complete model\n",
+                        v.c_str());
+            }
+        }
+        if (I.tail_skip > 0) {
+            LOG_WRN("the engine is skipping the %d weakest of the ten routed experts a token uses, when its "
+                    "cache misses them (--tail-skip %d): faster, and not the same model\n",
+                    10 - I.tail_skip, I.tail_skip);
+        }
+    }
     LOG_INF("engine ready: context %lld tokens, model %s\n", I.n_ctx, I.model_name.c_str());
 
     I.queue_tasks.on_new_task([this](server_task && task, bool is_yielding) {
@@ -1658,6 +1691,10 @@ void strata_context::init_routes(server_http_context & http) {
             {"engine", "strata"},
             // the containment state of the engine child: an operator's only way to check a running server
             {"sandbox", sandbox_state_name(I->sandbox_state)},
+            // the route tail skip the engine settled on: 0 = every routed expert is computed, N > 0 = a missed
+            // expert that a whole verify window routes at rank N or lower is dropped, null = this engine did not
+            // say, which an older one would not
+            {"tail_skip", I->tail_skip < 0 ? json() : json(I->tail_skip)},
         });
         return res;
     };

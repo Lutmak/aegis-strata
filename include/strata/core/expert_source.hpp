@@ -12,7 +12,7 @@
 //      layers, which is a finite, plausible, completely wrong token.  There is no cache here at all: the
 //      conversion is one 2560-element pass against a 0.3 ms/layer budget, and a correct answer is worth more
 //      than the microseconds.
-//   2. **THE POOL DOES NOT APPLY THE ROUTER WEIGHT.**  `moe_combine` (`src/core/layer.cpp:479`) sums
+//   2. **THE POOL DOES NOT APPLY THE ROUTER WEIGHT.**  `moe_combine` (`src/core/layer.cpp#else moe_combine`) sums
 //      `w[i] * parts[i]` on the device.  `ExpertJob::weight` is a diagnostic field; setting it here would
 //      apply the weight twice, which is invisible in a single layer and compounds over 48.
 //   3. **THE KERNEL'S GEOMETRY IS FIXED BY THE ARTIFACT** (`H = 2560`, `FF = 640`, `BLOB = 1,382,400`).  A
@@ -559,8 +559,8 @@ struct ExpertDispatch {
     /// #588: routed (token, expert) entries the GPU computed from outside its cache in verify windows: read over PCIe
     /// (--pcie-frac, kind 1) or on another GPU (kind 2).  In neither cache_hits nor cache_refused.
     int64_t offload_entries = 0;
-    /// STRATA_ROUTE_TAIL_SKIP=R: entries skipped (a missed expert every token of the window routes only at rank >= R)
-    /// and the distinct experts behind them (neither copied nor computed)
+    /// --tail-skip R: entries skipped (a missed expert every token of the window routes only at rank >= R) and
+    /// the distinct experts behind them (neither copied nor computed)
     int64_t tail_skipped = 0;
     int64_t tail_experts = 0;
     double ms_plan = 0, ms_actq = 0, ms_jobs = 0, ms_run = 0;   ///< verify-window dispatch sections
@@ -605,9 +605,11 @@ void expert_pool_dispatch(void* user, const float* x_f, const int32_t* ids, cons
 /// Plan v0.3 P6: the pool for a verify window of `n_tok` tokens.  `x_f` is (n_tok, n_embd), `ids` (n_tok, k) and
 /// `out` (n_tok * k, n_embd).  Each distinct missed expert is computed once for all the tokens routed to it;
 /// resident experts' rows are zeroed (the GPU adds them).  Requires `host_res` (the token-graph residency).
-/// STRATA_ROUTE_TAIL_SKIP rank (0: off).  Unset in the environment: 0 until the serve start-up sets the default.
-int tail_skip_rank();
-void set_tail_skip_rank(int r);
+/// The route tail skip's rank, 0 when nothing is skipped -- which is what it is until the start-up calls the
+/// setter with `decide_tail_skip`'s answer (--tail-skip N; strata/core/tail_skip.hpp).  Reads no environment: one
+/// decision, made once, announced in one line.
+// tail_skip_rank() / set_tail_skip_rank() are declared in strata/core/tail_skip.hpp,
+// alongside the decision that produces the rank and the 1-9 bound they share.
 
 void expert_pool_dispatch_multi(ExpertDispatch& d, const float* x_f, const int32_t* ids, int64_t n_tok, int64_t k,
                                 float* out);

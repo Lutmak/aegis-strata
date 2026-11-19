@@ -59,6 +59,7 @@ FALLBACK_ANSWERABLE = (
     "server/tests/sandbox_test.cpp", "server/tests/e2e.sh",
     "tools/check_docs.py", "tools/bench_switches.py", "tools/collect_profile_traces.py",
     "src/core/nv_defaults.cpp", "include/strata/core/nv_defaults.hpp", "src/core/nv_defaults_test.cpp",
+    "src/core/tail_skip.cpp", "include/strata/core/tail_skip.hpp", "src/core/tail_skip_test.cpp",
 )
 # NOT listed above, deliberately: tools/gguf_writer.py, tools/mtp_fetch.py and tools/strata_tokenizer.py are
 # unmodified from the import (`git diff --name-only 39cab36 -- <file>` is empty for each). Their comments cite
