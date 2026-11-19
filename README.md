@@ -9,7 +9,7 @@ Point your coding agent at it instead of a cloud provider.
 | **Hardware** | one NVIDIA GPU; 12 GB is enough, plus about 43 GB of system RAM |
 | **Reads** | 1,180–2,196 tokens/s, rising with the length of the prompt |
 | **Writes** | 72–87 tokens/s, computing every expert each token was routed through |
-| **Context** | 98,304 tokens |
+| **Context** | 131,072 tokens (128K) |
 | **Network** | the process that sees your prompts has none: empty namespace, no sockets, no DNS |
 | **Install** | `git clone`, `make build`, `make test` — no binary, no installer, no account, no `sudo` |
 
@@ -120,7 +120,7 @@ build/bin/aegis --engine build/bin/strata \
      --expert-profile data/expert-profile.bin \
      --expert-cache auto --prefill 4096 --spec 4 --spec-min-p 0.5 \
      --mtp /models/mtp/rt \
-     --max-context 98304 --kv int8 --ple-io direct --kv-grow \
+     --max-context 131072 --kv int8 --ple-io direct --kv-grow \
      --vram-reserve-mib 1152 --pool-workers 15 --gpu 0
 ```
 
@@ -139,21 +139,23 @@ elsewhere:
   the path you give, and fails at load otherwise.
 - **`--ple-io direct`** reads a large lookup table from SSD as it goes. The alternative locks that
   table in RAM, and the engine is already using about 43 GB of 62 GB.
-- **`--max-context 98304`** is not limited by the card the way you would expect. The model's trained
+- **`--max-context 131072`** is not limited by the card the way you would expect. The model's trained
   context is 262,144, and only 12 of its 48 layers are full-attention — the other 36 are linear and
-  carry a fixed-size state that does not grow with the conversation. So 96K of K/V costs **1.27 GiB**
+  carry a fixed-size state that does not grow with the conversation. So 128K of K/V costs **1.68 GiB**
   at `--kv int8`, where a conventional 48-layer model of this size would want tens of gigabytes.
 - **`--kv-grow`** lets the context cache claim GPU memory as the conversation fills it, rather than
-  reserving all of it at load. It takes that memory from the expert cache as it goes: 2,973 slots at
-  load, 2,584 once 96K is genuinely full. Peak use is 11,547 MiB of 12,288.
+  reserving all of it at load. It takes that memory from the expert cache as it goes: 2,940 slots at
+  load, 2,074 once 128K is genuinely full. Peak use is 11,202 MiB of 12,288.
 - **`--prefill 4096`** rather than `auto`. This one is counter-intuitive and it is the reason the
   command line above is safe. The prompt path borrows expert-cache slots for its buffers, and the
   borrow scales with the chunk: at `auto` (8,192 tokens) it takes 4.00 GiB, which leaves the growing
-  K/V nowhere to go but the free pool — filling the context drove free VRAM to 371 MiB, inside the
-  band where the driver starts paging GPU memory to system RAM and decode collapses. At 4,096 the
-  borrow is 2.49 GiB and the floor is **741 MiB**. It costs about 17% of prompt speed.
-  Raising `--vram-reserve-mib` does *not* fix this: 832 → 1,400 moved the floor from 385 to 371 MiB,
-  because the reserve sizes the cache at load and the borrow happens afterwards.
+  K/V nowhere to go but the free pool. At a 128K context that is not a slow path, it is a dead one — a
+  real 124K prompt drove free VRAM to 326 MiB and the engine then died mid-request with
+  `ggml-cuda (strata mmq): out of memory`, which the server reported as a 503. At 4,096 the borrow is
+  2.49 GiB, the floor is **1,086 MiB**, and the same prompt is answered. It costs prompt speed —
+  about 8% at a 2K prompt and about 18% at 8K.
+  Raising `--vram-reserve-mib` does *not* fix this: 832 → 1,400 moved the floor from 385 to 371 MiB
+  at a 96K context, because the reserve sizes the cache at load and the borrow happens afterwards.
 - **`--gpu 0`** stated explicitly, in case a second GPU is driving your display.
 
 One thing is **deliberately absent** from that command line: `--tail-skip 7`. It is the largest single
@@ -261,11 +263,11 @@ against any other engine.
 | | |
 |---|---|
 | Load until ready | 14–18 s |
-| Reading your prompt | 1,180 tokens/s at 2K, 2,093 at 8K, 2,140 at 34K, 2,196 at 97K |
-| Writing the answer | 72–87 tokens/s for a short answer, the whole model; 85–101 with `--tail-skip 7` |
-| GPU memory at peak | 11,547 MiB of 12,288; the worst case measured left 741 MiB free |
+| Reading your prompt | 1,180 tokens/s at 2K, 2,093 at 8K, 2,140 at 34K, 2,196 at 96K, 2,156 at 124K |
+| Writing the answer | 72–87 tokens/s for a short answer, the whole model; 57 with a 124K prompt already in front of it; 85–101 with `--tail-skip 7` |
+| GPU memory at peak | 11,202 MiB of 12,288; the worst case measured left 1,086 MiB free |
 | System RAM at peak | 43 GB |
-| Context | 98,304 tokens with `--kv int8` |
+| Context | 131,072 tokens with `--kv int8`, measured full |
 
 Prompt reading is quoted at several lengths on purpose: the rate climbs with the prompt, because a
 fixed per-request cost is spread over more tokens. A single figure would be misleading, and an

@@ -71,7 +71,7 @@ temperature 0, the server restarted for every run, and one warm-up answer discar
 **Two caveats on the figures in this section, both dated.** They were taken when the route tail skip was on by
 default, so both arms of every pair below were answering tokens from fewer than ten experts; the skip is off now.
 And they were taken with the harness configured at `--prefill auto --max-context 32768`, where it now runs the
-README's line (`--prefill 4096 --max-context 98304 --vram-reserve-mib 1152`) — the prompt path's borrow differs
+README's line (`--prefill 4096 --max-context 131072 --vram-reserve-mib 1152`) — the prompt path's borrow differs
 by 1.5 GiB between those, and the expert cache is sized against the reserve at load. The deltas are paired, so
 the *relative* figures below are the best evidence there is for which of the seven switches earn their place, and
 the absolute tok/s are not comparable to anything else in this file. Re-measuring the drop-one table at the
@@ -165,7 +165,7 @@ a candidate: on a card that holds every expert, nothing is skipped however this 
 ### What it does
 
 This model routes each token through **ten** of the 512 experts in each of its 48 layers — 480 expert lookups
-per token. A 12 GB card holds 2,973 of the 24,576 (layer, expert) pairs, about 12%, and that 12% catches roughly
+per token. A 12 GB card holds 2,940 of the 24,576 (layer, expert) pairs, about 12%, and that 12% catches roughly
 three quarters of the lookups because some experts are far more popular than others. The rest are misses, and a
 miss is normally either copied over PCIe or computed on the CPU.
 
@@ -478,10 +478,10 @@ cards, and it sits at the same order as the run-to-run floor of the method that 
 recorded here as a disclosure rather than as a measurement of this pack. `tools/bench_quality.py` is the
 instrument that can settle it on this card, and `STRATA_PREFILL_CPU_SHARE=0` is the arm to compare against.
 
-## A 96K context on a 12 GB card, and why the limit is not where you would guess
+## A 128K context on a 12 GB card, and why the limit is not where you would guess
 
-The README ships `--max-context 98304`, not because 98,304 is a tuned number but because the card turned out not
-to be the binding constraint. Two facts about this model's geometry, both from the GGUF's own metadata:
+The README ships `--max-context 131072` — 128K — and the card is not what stopped it there. Two facts about this
+model's geometry, both from the GGUF's own metadata:
 
 - `context_length` is **262,144**. The trained context is not the limit either.
 - `full_attention_interval` is **4**, over `block_count` **48**. Only **12 layers** keep a per-token K/V. The other
@@ -497,8 +497,8 @@ prints at load, at `--kv int8 --kv-grow` on the shipped command line:
 | context | K/V, the engine's figure | 12 × 1,056 × context | expert slots at load |
 |---|---|---|---|
 | 32,768 | 0.46 GiB | 0.39 GiB | — |
-| 98,304 | **1.27 GiB** | 1.16 GiB | 2,973 |
-| 131,072 | 1.68 GiB | 1.55 GiB | 2,940 |
+| 98,304 | 1.27 GiB | 1.16 GiB | 2,973 |
+| 131,072 (**shipped**) | **1.68 GiB** | 1.55 GiB | 2,940 |
 | 262,144 | ~3.3 GiB (not attempted here) | 3.09 GiB | — |
 
 **The two columns do not match, and the per-cell figure is not the whole story.** An earlier version of this
@@ -511,29 +511,60 @@ marginal cost between the last two rows is 13,435 bytes a token against the 12,6
 Take the first column as measured and the second only as a floor.
 
 Either way the conclusion holds and is the point of the section: quadrupling the context costs about a
-gigabyte. `--kv-grow` takes it from the expert cache as the conversation actually fills rather than at load
-(2,973 slots at load, 2,584 once 96K is genuinely full), and **128K costs 33 slots of the 2,973** — the card is
-not what limits the context here.
+gigabyte. `--kv-grow` takes it from the expert cache as the conversation actually fills rather than at load, so a
+longer context is paid for in expert residency and not in peak VRAM. Both halves of that were measured on this
+tree, one after the other, on an idle card:
+
+| `--max-context` | slots at load | slots still holding experts, context full | K/V full | peak VRAM | free VRAM at worst |
+|---|---|---|---|---|---|
+| 98,304 | 2,973 | 2,353 | 1.27 GiB | 11,134 MiB | 1,154 MiB |
+| 131,072 (**shipped**) | 2,940 | 2,074 | 1.68 GiB | 11,202 MiB | 1,086 MiB |
+
+So 128K over 96K costs **33 slots at load, 279 more once the context is full, and 68 MiB of the floor** — and the
+card is not what limits the context here. Earlier editions of this document put the 96K floor at 741 MiB and the
+96K peak at 11,547 MiB; those were taken on an older tree and the pair above supersedes them.
 
 ### The constraint is the prompt path's borrow, not the K/V
 
 The prompt path borrows expert-cache slots for its buffers and refills them afterwards (`--no-prefill-borrow`
 reserves them for the session instead). The borrow scales with the chunk, and at `--prefill auto` on this pack
-that is 8,192 tokens and **4.00 GiB** — which leaves a growing K/V nowhere to go but the free pool. Filling a 96K
-context drove free VRAM to **371 MiB**, inside the band where the driver can page GPU memory to system RAM and
-decode collapses to a few tokens a second. The engine warns below 512 MiB and it is right to.
+that is 8,192 tokens and **4.00 GiB** — which leaves a growing K/V nowhere to go but the free pool. At 96K that
+cost speed: filling the context drove free VRAM to **371 MiB**, inside the band where the driver can page GPU
+memory to system RAM and decode collapses to a few tokens a second. The engine warns below 512 MiB and it is
+right to.
+
+At 128K it does not cost speed, it costs the request. Measured on this tree with everything else as the README
+ships it, a real 123,866-token prompt at `--prefill auto` took the expert cache to its floor, drove free VRAM to
+**326 MiB**, and the engine then died mid-request:
+
+```
+strata serve: the prompt path borrows 2449 CUDA0 cache slots (4.00 GiB)
+strata generate: elastic K/V: 16384 of 131072 cells in VRAM (0.25 of 1.68 GiB); the expert cache (2940 slots)
+                 gives the K/V room below slot 491 as the context grows
+strata: K/V grown to 131072 cells (1.68 GiB); ... - and new VRAM, the cache being at its floor
+ggml-cuda (strata mmq): out of memory: cudaMalloc(&p, size)
+```
+
+The server turned that into `503 the engine exited during the request`. The same prompt at `--prefill 4096` is
+answered with 1,086 MiB still free, which is why the chunk size is in the shipped line and not a tuning note.
+Note the mechanism in the third line: at `auto` the cache can only lend the K/V room below slot 491, against
+slot 1404 at 4096, so the K/V runs out of lendable cache and goes to the free pool instead.
 
 `--vram-reserve-mib` does not fix this, which is the counter-intuitive part and worth recording:
 
-| `--vram-reserve-mib` | `--prefill` | expert slots at load | free VRAM, 96K context full |
-|---|---|---|---|
-| 832 | auto | 3,165 | 385 MiB |
-| 1,400 | auto | 2,821 | 371 MiB |
-| 1,152 | **4096** | 2,973 | **741 MiB** |
+| `--vram-reserve-mib` | `--prefill` | context | expert slots at load | free VRAM at worst |
+|---|---|---|---|---|
+| 832 | auto | 98,304 | 3,165 | 385 MiB |
+| 1,400 | auto | 98,304 | 2,821 | 371 MiB |
+| 1,152 | auto | 131,072 | 2,940 | 326 MiB, then **out of memory** |
+| 1,152 | **4096** | 98,304 | 2,973 | 1,154 MiB |
+| 1,152 | **4096** | **131,072** | 2,940 | **1,086 MiB** |
 
 Raising the reserve by 568 MiB moved the floor by −14 MiB. The reserve sizes the expert cache *at load*; the borrow
 happens per request afterwards, so a bigger reserve just hands the borrow more to take. Halving the chunk halves
-the borrow — 1,531 slots, 2.49 GiB — and doubles the floor.
+the borrow — 1,536 slots, 2.49 GiB — and is what actually moves the floor. The first two rows are 96K
+measurements from an older tree, kept because the mechanism they establish still holds; the last three were
+measured together on this one.
 
 ### What the shipped command line measures
 
@@ -544,24 +575,30 @@ Same machine as above, with the engine's own default switches on, through the HT
 | prompt, 2,047 tokens | 1,180 tok/s |
 | prompt, 8,581 tokens | 2,093 tok/s |
 | prompt, 34,157 tokens | 2,140 tok/s |
-| prompt, 96,966 tokens | 2,196 tok/s |
+| prompt, 95,713 tokens | 2,196 tok/s |
+| prompt, 123,866 tokens | 2,156 tok/s |
 | decode, 256-token answers | 100.2, 105.8, 107.6 → **median 105.8 tok/s** (route tail skip ON — see below) |
-| decode, 96K context full | ~78 tok/s (route tail skip ON — see below) |
-| free VRAM at worst | 741 MiB of 12,288 |
+| decode, 128K context full | **57.2 tok/s**, skip off: a 95-token answer after a 123,866-token prompt |
+| free VRAM at worst | 1,086 MiB of 12,288 |
 
-**The two decode rows were measured with the route tail skip on, which is no longer the default.** With the skip
-off — the complete model, which is what this command line now runs — the same machine measures 74.8 tok/s on a
-story, 71.6 on prose and 86.6 on a code answer, restarting the server for every run; adding `--tail-skip 7` puts
-them at 85.2, 96.1 and 101.5. Those six figures and their commands are in
+**The 256-token decode row was measured with the route tail skip on, which is no longer the default.** With the
+skip off — the complete model, which is what this command line now runs — the same machine measures 74.8 tok/s on
+a story, 71.6 on prose and 86.6 on a code answer, restarting the server for every run; adding `--tail-skip 7`
+puts them at 85.2, 96.1 and 101.5. Those six figures and their commands are in
 [what the route tail skip is, and what it costs here](#what-the-route-tail-skip-is-and-what-it-costs-here). The
-96K-context-full row has **not** been re-measured with the skip off, so take it as an upper bound; the prompt
-rates are unaffected, because the skip is not on the prompt path this command line uses.
+context-full row **is** skip-off and is the real cost of a long conversation: 57.2 tok/s against 72-87 on a short
+one, because a full 128K K/V has taken 866 slots from the expert cache and only 2,074 of 2,940 still hold
+experts. Prompt rates are unaffected either way, because the skip is not on the prompt path this command line
+uses.
 
 Every prompt rate is a `reused=0` run on unique text. The decode figures are **not** comparable to the
 `89.60`/`98.24` pair at the top of this file: those restart the engine for every run and reply to one fixed prompt,
 which is the protocol an A/B needs, and these do not restart. They are quoted only to show the shipped line is not
 slower in ordinary use. Retrieval was checked rather than assumed — a fact planted mid-document was read back
-correctly from prompts of 37,593, 75,092, 93,758, 97,649 and 101,499 tokens.
+correctly from prompts of 37,593, 75,092, 93,758, 97,649 and 101,499 tokens, and at the shipped 131,072 from a
+123,866-token prompt with the planted fact 69% of the way in.
 
-`--max-context 102400` also runs and retrieves correctly, but its floor is 327 MiB even at `--prefill 4096`, so
-98,304 is what the README quotes.
+One earlier measurement in this file disagreed with the ones above and has been removed rather than reconciled:
+`--max-context 102400` was recorded as having a 327 MiB floor even at `--prefill 4096`, which cannot sit beside a
+measured 1,086 MiB at the larger 131,072. It was taken on an older tree, 102,400 has not been re-measured here,
+and nothing now ships against it. If you want that number, measure it again.
