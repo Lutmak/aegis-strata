@@ -2,7 +2,7 @@
 //
 // WHY THIS EXISTS AT ALL.  `ggml_mul_mat` converts the ACTIVATION (src1) to the weight's `vec_dot_type`
 // before the dot product - the rule established over rounds 119-136 and written into `ref/quant.py` as
-// `apply_src1`.  The CPU expert path already honours it (`bench/micro/cpu_s2.cpp` quantizes to int8 and uses
+// `apply_src1`.  The CPU expert path already honours it (upstream's `bench/micro/cpu_s2.cpp` quantizes to int8 and uses
 // `vpdpbusd`), and its P0.T2 parity passes at 1.461e-06.  The GPU kernels added in rounds 166-177 take FP16
 // activations instead.  **Left that way, the two paths would compute different numbers for different experts
 // of the SAME token** - not a tolerance question, an inconsistency inside one forward pass.
@@ -81,7 +81,7 @@ __global__ void quantize_q8_0_kernel(const float* __restrict__ x, uint8_t* __res
 /// The engine computes every routed expert twice.  MISSES go through `cpu/expert.cpp:138 act_quant_q8_1`
 /// into the VNNI kernel; HITS went through `quantize_q8_0` above.  **Those are not the same quantization**,
 /// and round 330 measured the difference with both real implementations linked
-/// (`bench/micro/act_quant_parity.cu`):
+/// (upstream's `bench/micro/act_quant_parity.cu`):
 ///
 ///     int8 activations differing : 0 of 2560                       <- this rule's ties are measure-zero
 ///     chunks whose SCALE differs : 80 of 80, max rel 4.761e-04     <- 2^-11: fp32 vs the block's fp16

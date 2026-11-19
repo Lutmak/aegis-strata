@@ -12,7 +12,7 @@
 // **THE SUMMATION ORDER IS NOT THE CPU's AND CANNOT BE.**  Lane `L` takes chunks `L, L+32, ...` and the
 // partials are reduced through shuffle; the CPU walks every chunk in order with its own accumulator shape.
 // The two agree to float rounding and not to the bit, which is the same contract `s_gemv_parity` carries for
-// the same reason.  `bench/micro/moe_hit_parity.cu` is the check.
+// the same reason.  upstream's `bench/micro/moe_hit_parity.cu` is the check.
 #include "strata/kernels/s2_expert_grouped.hpp"
 #include "strata/core/geometry.hpp"
 #include "strata/kernels/dp4a.hpp"
@@ -62,7 +62,7 @@ __device__ __forceinline__ float f16_at(const uint8_t* p) {
 /// **`x_scales` IS R4.2h AND IT IS OPTIONAL ON PURPOSE.**  When it is non-null the activation's multiplier
 /// comes from an fp32 array instead of the block's fp16 `d`.  The CPU pool multiplies by the fp32
 /// `ActQ::scale` (`cpu/expert.cpp:92`), and the two disagreed by **4.761e-04 relative on 80 of 80 chunks**
-/// (`bench/micro/act_quant_parity.cu`), which is what made a cache hit compute a different expert from a
+/// (upstream's `bench/micro/act_quant_parity.cu`), which is what made a cache hit compute a different expert from a
 /// cache miss.  Null keeps the previous fp16 behaviour **exactly**, so `moe_hit_parity` - which passes no
 /// scales - still measures the kernel it always measured.
 __device__ __forceinline__ float row_dot_s2_q8(const uint8_t* __restrict__ codes,
@@ -165,7 +165,7 @@ __global__ void gu_kernel(const uint8_t* __restrict__ blob_base, const int32_t* 
 /// `silu(gate) * up`, in place, over a GATE-MAJOR buffer: `[0, n_pairs)` is every hit's gate and
 /// `[n_pairs, 2*n_pairs)` is every hit's up, so hit `h`'s row `r` meets itself at `h*FF + r`.
 ///
-/// SiLU on the GATE and multiplied by up - the reading `docs/semantics.md` records, and the one that is wrong
+/// SiLU on the GATE and multiplied by up - the reading upstream's `docs/semantics.md` records, and the one that is wrong
 /// the other way round in a way that still produces a finite number.
 __global__ void swiglu_kernel(float* __restrict__ gate_up, long long n_pairs) {
     const long long i = (long long) blockIdx.x * blockDim.x + threadIdx.x;

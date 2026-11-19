@@ -459,7 +459,7 @@ struct Options {
     /// error) and of --native-head-gguf's (the same list unless that names another model).
     std::vector<std::string> native_shards, native_head_shards;
     /// Plan v0.3 P1: the whole native arithmetic set as ONE switch (model shard 1). It enables exactly the
-    /// combination recorded in bench/results/2026-09-23-attention-ple plus the native indexer, and never the
+    /// combination recorded in upstream bench/results/2026-09-23-attention-ple plus the native indexer, and never the
     /// <=256-token attention adapter. It becomes the default once P0 shows it is not slower.
     std::string native_preset;
     /// The token embedding from this GGUF instead of --native's (tools/embd_bf16_pack.py: BF16 as shipped)
@@ -810,7 +810,7 @@ void usage() {
                  "  --kv fp16|int8       KV storage (plan v0.3 P7): int8 codes + fp16 scale per 64 values, half the\n"
                  "                       VRAM; default fp16 until gate G-C accepts int8\n"
                  "  --kv q4_0            4-bit K/V after a Hadamard rotation (PR #21): half of int8's memory,\n"
-                 "                       slightly lower precision (see bench/results/2026-09-27-kv-q4)\n"
+                 "                       slightly lower precision (see upstream bench/results/2026-09-27-kv-q4)\n"
                  "  --kv k8v4            hybrid: INT8 K (exact attention scores) + rotated Q4_0 V, 816 B/cell\n"
                  "                       (vs int8's 1,056); streams with --kv-resident too\n"
                  "  --kv-resident N      KV streaming: keep N cells of each QSA layer in VRAM (min 20480) and the\n"
@@ -1399,7 +1399,7 @@ bool launch_blocking() {
 std::atomic<int64_t> g_req_vram_free_mib{-1};
 constexpr int64_t kVramSafeMib =
 #ifdef _WIN32
-    1024;   // WDDM pages instead of failing (docs/DETAILS.md, the sysmem fallback): the line #2065 fell below
+    1024;   // WDDM pages instead of failing (upstream docs/DETAILS.md, the sysmem fallback): the line #2065 fell below
 #else
     512;
 #endif
@@ -2875,8 +2875,8 @@ static int run(int argc, char** argv) {
     // The helper-GPU caches are allowed beside the resident RAM mode too: their experts are left out of the RAM copy
     // like a stage's (below), the helpers' refills read through the source (the RAM copy when it holds the bytes),
     // and the two adaptive tiers already keep each other's experts out (helper_holds in the primary's candidates,
-    // RemoteExpertOpt::adapt's resident table).  Measured on RX 6800 + RX 6600, Windows (docs/SECOND_GPU.md).
-    // the helper-GPU expert caches (--expert-cache-remote, docs/SECOND_GPU.md): CUDA1..3 on one GPU; with a layer
+    // RemoteExpertOpt::adapt's resident table).  Measured on RX 6800 + RX 6600, Windows (upstream docs/SECOND_GPU.md).
+    // the helper-GPU expert caches (--expert-cache-remote, upstream docs/SECOND_GPU.md): CUDA1..3 on one GPU; with a layer
     // split, the visible GPUs no stage runs on, in order
     int remote_dev[3] = {1, 2, 3};
     if (primary_device != 0) {
@@ -3027,7 +3027,7 @@ static int run(int argc, char** argv) {
     strata::core::qsa_set_kv_resident(o.kv_resident);
     // Prompt lookup (the suffix drafter, on by default): the MTP keeps its --spec windows and a lookup window may be
     // up to 2 tokens longer; the draft policy (strata/spec/draft_policy.hpp) takes one only where it pays. Code
-    // edits +6-11%, ordinary text unchanged (bench/results/2026-09-27-spec). --suffix-draft 0 turns it off.
+    // edits +6-11%, ordinary text unchanged (upstream bench/results/2026-09-27-spec). --suffix-draft 0 turns it off.
     if (o.suffix_draft > 0 && o.spec >= 2 && o.mtp_max_t == 0) {
         o.mtp_max_t = o.spec;
         o.spec = std::min(o.spec + 2, 8);   // kVerifyMaxT
@@ -3766,10 +3766,10 @@ static int run(int argc, char** argv) {
     void* sbuf = nullptr;   // allocated after the layer-split search, sized to CUDA0's own layer range (the carve)
     // **THE ENGINE RAN ON THE LEGACY DEFAULT STREAM, WHICH ON WDDM IS THE SLOW PATH.**  All four session
     // calls - `session_capture`, `session_replay`, `session_token` and `session_loop` - were handed `nullptr`,
-    // i.e. stream 0.  `bench/micro/kernel_costs.cu` measures what that costs: EVERY kernel it launches through
+    // i.e. stream 0.  upstream's `bench/micro/kernel_costs.cu` measures what that costs: EVERY kernel it launches through
     // a wrapper comes back at 28-31 us REGARDLESS OF SIZE, `scale_inplace` on 2,048 floats and `silu_inplace`
     // on 10,240 floats being indistinguishable, which is a fixed per-launch cost and not execution.
-    // `bench/micro/graph_node_cost.cu` measures the same kernels on a real stream at 3.63 us ungrapped and
+    // upstream's `bench/micro/graph_node_cost.cu` measures the same kernels on a real stream at 3.63 us ungrapped and
     // 0.805 us inside a graph.  **That is an ~8x penalty on every launch in the engine.**
     cudaStream_t main_stream = nullptr;
     if (cudaStreamCreateWithFlags(&main_stream, cudaStreamNonBlocking) != cudaSuccess) {
@@ -4249,7 +4249,7 @@ static int run(int argc, char** argv) {
     std::vector<std::pair<int32_t, int32_t>> profile_loaded;
     if (!o.expert_profile_save.empty()) profile_loaded = profile;
     // ---- layer split across GPUs: "auto" places the split points by a cost model of one decode window, measured on
-    // the 5080 + 3090 rig (bench/results/2026-09-29-layer-split):
+    // the 5080 + 3090 rig (upstream bench/results/2026-09-29-layer-split):
     //   - every layer costs its GPU a time inversely proportional to SMs x clock (0.33 ms on an RTX 5080, 0.50 on a
     //     3090: the per-layer round trip and kernels, not the bytes - both cards have ~950 GB/s);
     //   - an expert no cache holds costs ~190 ms per unit of routed mass: the CPU pool in decode and the PCIe stream
@@ -5216,7 +5216,7 @@ static int run(int argc, char** argv) {
             o.batch = fit;
             resolve_groups_auto();   // (the slots that fit may not be the ones asked for)
             if (o.batch_groups > 1 && o.batch % o.batch_groups != 0) o.batch_groups = 1;
-            // the sessions' VRAM is the expert cache's: say what it costs (docs/BATCHING.md has the measured trade)
+            // the sessions' VRAM is the expert cache's: say what it costs (upstream docs/BATCHING.md has the measured trade)
             std::fprintf(stderr, "strata generate: --batch %d: the slot sessions take %.2f GiB of VRAM on CUDA0 that the "
                                  "expert cache would otherwise hold\n", o.batch,
                          (double) bytes0 * o.batch / 1073741824.0);
@@ -5639,7 +5639,7 @@ static int run(int argc, char** argv) {
         // read+fill about 24x (measured 0.05 vs 1.42 GiB/s for the same binary, args and cache state; the
         // scheduler's defaults - Below normal priority and a least-privilege token - were the only
         // difference between the runs).  Say so instead of letting the user blame the disk; see
-        // docs/DETAILS.md, "Running it at startup (Task Scheduler)".
+        // upstream docs/DETAILS.md, "Running it at startup (Task Scheduler)".
 #ifdef _WIN32   // a Windows launch context; elsewhere a load this slow is the disk
         if (arena_src.load_gib_per_second() > 0.0 && arena_src.load_gib_per_second() < 0.2) {
             std::fprintf(stderr,

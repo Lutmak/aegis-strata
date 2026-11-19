@@ -2,7 +2,7 @@
 //
 // THE GAP THIS CLOSES (round 186).  `ggml_mul_mat` converts src1 - the ACTIVATION - to the weight's
 // `vec_dot_type` before the dot product, and for Q2_0 that is Q8_0.  The CUDA kernels built in rounds 166-177
-// take FP16 activations instead, while the CPU expert path (`bench/micro/cpu_s2.cpp`) already quantizes to int8
+// take FP16 activations instead, while the CPU expert path (upstream's `bench/micro/cpu_s2.cpp`) already quantizes to int8
 // and uses `vpdpbusd`.  Left that way the two paths compute different numbers for different experts of the SAME
 // token, and the measured size of the difference is the activation contract itself: 0.9498% relative, against
 // P2.S2's 1e-3 tolerance for FP16 paths.

@@ -491,7 +491,7 @@ struct ExpertDispatch {
     /// **R4.2h: THE CPU's fp32 ACTIVATION SCALES, `(n_embd/32)` FLOATS.**  Without them the GPU's hits are
     /// computed with the `block_q8_0`'s fp16 `d` while the CPU's misses use the fp32 `ActQ::scale`
     /// (`cpu/expert.cpp:92`) - **4.761e-04 relative on 80 of 80 chunks**, measured with both real
-    /// implementations linked in `bench/micro/act_quant_parity.cu`.  That disagreement is why turning the
+    /// implementations linked in upstream's `bench/micro/act_quant_parity.cu`.  That disagreement is why turning the
     /// cache on changed the generated tokens.  Required whenever the hit path runs.
     float* x_q8_0_hit_scale = nullptr;
     int32_t* d_slot = nullptr;             ///< device, K entries
@@ -1042,7 +1042,7 @@ private:
 // n-gram is 60.8 GB of mapped, file-backed pages on a 63 GB machine - and file-backed pages are exactly the ones
 // the OS drops from the standby list when it wants memory.  The expert stream then re-faults from disk.
 //
-// Measured, this round: the pool runs at **~19 GB/s in the engine against 42.8 GB/s in `bench/micro/cpu_s2.cpp`
+// Measured, this round: the pool runs at **~19 GB/s in the engine against 42.8 GB/s in upstream's `bench/micro/cpu_s2.cpp`
 // on the same machine, reading the same 34 GB**.  The micro does `std::fread` into a heap arena and reads
 // ordinary (anonymous, resident) memory; the engine reads `MapViewOfFile`.  That is the whole difference, and it
 // is why this class exists.

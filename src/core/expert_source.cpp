@@ -4173,7 +4173,7 @@ void expert_hit_run(void* user, void* stream, HitPhase phase, const int32_t* ids
         // - and a stale activation produces a perfectly finite expert for the wrong input.
         // **R4.2h: THE SCALED QUANTIZER, SO A HIT REPRODUCES A MISS.**  The CPU pool quantizes this same
         // activation with `act_quant_q8_1` and multiplies by the fp32 `ActQ::scale`; `quantize_q8_0` writes
-        // an fp16 `d` instead, and `bench/micro/act_quant_parity.cu` measured **80 of 80 chunks differing by
+        // an fp16 `d` instead, and upstream's `bench/micro/act_quant_parity.cu` measured **80 of 80 chunks differing by
         // up to 4.761e-04 relative**.  `quantize_q8_0_scaled` adopts the CPU's rule and scale, and the kernel
         // takes the fp32 array.  Falling back to the old path would silently reintroduce the divergence, so
         // the scales are required here rather than optional.

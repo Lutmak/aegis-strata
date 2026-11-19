@@ -50,10 +50,10 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("config")
     ap.add_argument("outdir")
-    # Required, with no default. It defaulted to bench/profile_corpus.json, which this fork deleted, so the
+    # Required, with no default. It defaulted to upstream bench/profile_corpus.json, which this fork deleted, so the
     # documented invocation died with a bare FileNotFoundError traceback from the json.load below.
     ap.add_argument("--corpus", required=True,
-                    help="JSON array of prompts (bench/profile_corpus.json is no longer shipped)")
+                    help="JSON array of prompts (upstream bench/profile_corpus.json is no longer shipped)")
     ap.add_argument("--max-new", type=int, default=250)
     ap.add_argument("--mode", choices=("usage", "routing"), default="usage")
     ap.add_argument("--only", help="comma-separated prompt numbers (default all)")

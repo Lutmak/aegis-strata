@@ -1,7 +1,7 @@
 // src/kernels/s2_gemv_parity.cpp - P2.S2's parity test for the S2 GEMV.
 //
 // The reference is the same CHAIN as the decode test: `strata::dequantize_q2_0` is a scalar transcription that
-// `bench/micro/dequant_xcheck` checks against **ggml's own** dequantizer, so comparing the GPU GEMV against a
+// upstream's `bench/micro/dequant_xcheck` checks against **ggml's own** dequantizer, so comparing the GPU GEMV against a
 // dot product built on that scalar decode compares against ggml through one proven hop.
 //
 // WHY A TOLERANCE AND NOT BIT EQUALITY.  The decode test is bit-exact because S2's decode is exact

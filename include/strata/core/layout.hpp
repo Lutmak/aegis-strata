@@ -7,7 +7,7 @@
 //   * round 194 sized the indexer key store from `indexer.head_count = 4`, which counts QUERY heads.  The
 //     cached key is ONE shared head of 128 (`indexer.k_proj` is [2560, 128]), so the term was 4x too big and
 //     the error survived a round because it moved in the direction that TIGHTENS the budget.
-//   * `docs/semantics.md` and the tensor manifest agree on every dimension here, but nothing CHECKED that a
+//   * upstream's `docs/semantics.md` and the tensor manifest agree on every dimension here, but nothing CHECKED that a
 //     named tensor had the shape the kernel reading it assumes.
 //
 // So this header does two things: it names the tensors per layer type, and it asserts every shape the

@@ -1,39 +1,49 @@
 # aegis-strata
 
-Run one large language model on your own machine, behind an OpenAI-compatible HTTP API on
-localhost. Point your coding agent at it instead of a cloud provider.
+**One large language model on your own machine, behind an OpenAI-compatible API on localhost.**
+Point your coding agent at it instead of a cloud provider.
 
-It runs **Qwen3.8-Flash-Next** on a single NVIDIA GPU. The model is far larger than any consumer
-card's memory, so most of it stays in system RAM and only the parts each token needs are streamed to
-the GPU. On a 12 GB card it answers at about 100 tokens a second, with a 96K context.
+|  |  |
+|---|---|
+| **Model** | Qwen3.8-Flash-Next (GSQ-RCO IQ3_XXS) — one model, and nothing else |
+| **Hardware** | one NVIDIA GPU; 12 GB is enough, plus about 43 GB of system RAM |
+| **Reads** | 1,180–2,196 tokens/s, rising with the length of the prompt |
+| **Writes** | 72–87 tokens/s, computing every expert each token was routed through |
+| **Context** | 98,304 tokens |
+| **Network** | the process that sees your prompts has none: empty namespace, no sockets, no DNS |
+| **Install** | `git clone`, `make build`, `make test` — no binary, no installer, no account, no `sudo` |
 
-You compile it yourself. There is no installer, no download button, no web interface, no account.
+Those rates are one RTX 3080 Ti, not a promise about your card;
+[Speed and memory](#speed-and-memory) has the machine and the method.
 
-## Why you might pick this one
+The model is far larger than any consumer card's memory, so most of it stays in system RAM and only
+the parts each token needs are streamed to the GPU. One flag trades some of that completeness back
+for speed, and says so when you use it.
 
-This began as a fork of an existing engine, and most of the work since has been taking things out
-and locking down what was left. The differences that matter to you:
+## What is different about this one
 
-**Nothing runs on your machine that you did not compile.** The projects this came from offer a
-quicker path: download a prebuilt engine, or copy a ready-made weights pack from someone's file
-host, and run it. That means executing a binary you cannot inspect, and one of those projects
-installs system packages with `sudo` along the way. All of it is gone here. You build from source,
-and if you ever see a file claiming to be an "aegis-strata release binary", it is not from this
-project.
+A fork of an existing engine, where most of the work since has gone into taking things out and
+locking down what was left. Four differences matter to you:
 
-**The part that reads your prompts cannot reach the network.** The engine runs as its own process
-inside an empty network namespace — not firewalled, but placed somewhere no network exists — behind
-a kernel filter that refuses to create any socket except a local one. Its view of your filesystem is
-cut down to the model files and the libraries it loads, so it cannot read `~/.ssh` or your shell
-history even if something goes wrong inside it. If any of that cannot be set up, the server refuses
-to start the engine rather than starting it unprotected. This does not stop your agent from
-searching the web — see below, because it is the question everyone asks first.
+**You compiled everything that runs.** The projects this came from offer a quicker path — download a
+prebuilt engine, copy a ready-made weights pack from someone's file host, let an installer run
+`sudo` along the way. All of it is gone. You build from source, and if you ever see a file claiming
+to be an "aegis-strata release binary", it is not from this project.
+
+**The process that reads your prompts cannot reach the network.** Not firewalled — placed somewhere
+no network exists. The engine runs as its own process in an empty network namespace, behind a kernel
+filter that refuses to create any socket but a local one, with its view of your filesystem cut down
+to the model files and the libraries it loads. It cannot read `~/.ssh` or your shell history even if
+something goes wrong inside it. If any of that cannot be set up, the server refuses to start the
+engine rather than starting it unprotected. Your agent can still search the web — that runs
+[somewhere else entirely](#the-engine-is-offline-your-agent-is-not), and it is the question everyone
+asks first.
 
 **It does one thing.** The engine it came from handles six model families across five GPU backends,
 with a Windows installer and a web UI. That is all removed. What is left is about a quarter of the
 code: a quarter as much to go wrong, and a quarter as much to read if you want to check it yourself.
 
-**The claims in these documents are tested.** `make test` runs the containment checks on any Linux
+**Every claim in these documents is tested.** `make test` runs the containment checks on any Linux
 box, with no GPU and no model file. Part of that suite also checks that every file path and number
 quoted in the documentation still matches the code, and fails when one does not.
 
@@ -146,6 +156,10 @@ elsewhere:
   because the reserve sizes the cache at load and the borrow happens afterwards.
 - **`--gpu 0`** stated explicitly, in case a second GPU is driving your display.
 
+One thing is **deliberately absent** from that command line: `--tail-skip 7`. It is the largest single
+speed win available on this card and it answers each token from fewer experts than its router chose.
+Add it and the engine will tell you it is doing so; the measurements either way are in `docs/speed.md`.
+
 ## The engine is offline. Your agent is not.
 
 This is the part people get wrong, so it is worth being plain about.
@@ -187,7 +201,11 @@ The containment is on by default and these are the only switches:
 | `--sandbox-allow-read PATH` | also let the engine read this path, repeatable |
 | `--sandbox-allow-write PATH` | also let it write there, repeatable |
 
-`GET /props` reports which of those you actually got, as `sandbox`.
+`GET /props` reports which of those you actually got, as `sandbox`, and the route tail skip the engine
+settled on, as `tail_skip`: `0` means every routed expert is computed, `N` means the N weakest of the
+ten are dropped on a cache miss, and `null` means this engine reported no such setting — an older
+engine, or one that is not this one. It is the engine's *outcome*, not your request: ask for the skip
+in a configuration where the dispatch cannot honour it and `/props` says `0`.
 
 ### When the engine stops answering
 
@@ -244,7 +262,7 @@ against any other engine.
 |---|---|
 | Load until ready | 14–18 s |
 | Reading your prompt | 1,180 tokens/s at 2K, 2,093 at 8K, 2,140 at 34K, 2,196 at 97K |
-| Writing the answer | ~100 tokens/s for a short answer; ~78 with the context full |
+| Writing the answer | 72–87 tokens/s for a short answer, the whole model; 85–101 with `--tail-skip 7` |
 | GPU memory at peak | 11,547 MiB of 12,288; the worst case measured left 741 MiB free |
 | System RAM at peak | 43 GB |
 | Context | 98,304 tokens with `--kv int8` |
@@ -256,11 +274,15 @@ understated a realistic one by more than ten times. Every rate here was measured
 a different prompt of the same length each time — so no prompt-cache reuse flatters them.
 
 The prompt rates are lower than the ones in `docs/speed.md`, which were taken at `--prefill auto`:
-the chunk size this command line ships costs about 17% of prompt speed to keep the memory floor
-safe, and that section explains the trade. Writing speed is unaffected by it.
+the chunk size this command line ships costs prompt speed to keep the memory floor safe — about 8%
+at a 2K prompt and about 18% at 8K, from the two tables in that document — and that section
+explains the trade. Writing speed is unaffected by it.
 
 Turning the engine's containment off made no measurable difference — 88.5 against 89.0 tokens a
-second across several runs — so the protection costs you nothing.
+second across several runs — so the protection costs you nothing. Those two figures, and the +9.7%
+below, were measured while the route tail skip was still on; both are ratios between two arms that
+had it equally on, so the comparisons stand, but do not read either absolute number as a rate this
+command line produces today. The rates in the table above are the current ones.
 
 **Seven speed switches are on by default on an RTX 30-series card**, worth about +9.7% of that
 writing speed for 2 MiB of GPU memory. They also change the model's exact wording, so
@@ -268,6 +290,19 @@ writing speed for 2 MiB of GPU memory. They also change the model's exact wordin
 `STRATA_SM86_PERF=0`, and how to re-measure them on a card that is not this one with
 `tools/bench_switches.py`. If your GPU is not an RTX 30-series, none of them are on and that
 document is where to start looking for the same win.
+
+**An eighth setting is deliberately off, and it is the fastest one available.** The engine this
+forked from drops some of the experts a token was routed through when they are not in the GPU's
+cache — it calls this the route tail skip, and it is on by default there for every NVIDIA card. It
+is worth **×1.14 to ×1.34 of writing speed** on this card, more than all seven switches together,
+and it costs **11% to 16% of the model's own argmaxes** against a measured floor of zero. Those two
+figures come from different paths — the speed from decode, the cost from prompt reading, which is
+the only path on this engine reproducible enough to measure a change this size — and the cost is an
+upper bound for that reason; `docs/speed.md` says why in full. So it is
+not a default here: the engine computes every routed expert unless you ask it not to, with
+`--tail-skip 7` on the engine's command line, and it prints which of the two it is doing every time
+it starts. `docs/speed.md` has both halves of the trade, measured on this machine, with the commands
+that produce them. The choice is yours to make, but it should be yours to make.
 
 ## Security
 

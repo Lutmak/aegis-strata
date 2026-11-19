@@ -1,6 +1,6 @@
 // Adapted from llama.cpp 3cf03257f219afbe7334045ff7c6a06ac68c627d:
 // ggml/src/ggml-cuda/{quantize.cu,vecdotq.cuh,mmvq.cu,common.cuh}
-// and ggml/src/ggml-common.h. See docs/native-mmvq.md for exact scope.
+// and ggml/src/ggml-common.h. See upstream docs/native-mmvq.md for exact scope.
 //
 // MIT License
 // Copyright (c) 2023-2026 The ggml authors
@@ -974,7 +974,7 @@ __global__ void native_small_mmvq_kernel(const Weight* __restrict__ w,
 // small-K rule). Column j reads activation blocks x + j * (n_in / 32) and writes y + j * n_out. Each (column,
 // row) value is accumulated over kbx in the same order, summed across warps in the same order and reduced with
 // the same warp tree as the ncols = 1 kernel, so every column is BITWISE equal to a single-column call on that
-// column (checked by bench/micro/native_mmvq_multi.cpp). The ncols = 1 kernels are untouched.
+// column (checked by upstream bench/micro/native_mmvq_multi.cpp). The ncols = 1 kernels are untouched.
 constexpr int MAX_NCOLS = 8;
 
 // Each format splits its dot product into `load` (everything that depends only on the weight block: codes,
@@ -3344,7 +3344,7 @@ constexpr IlRows kIlRowsShared[] = {   // sm_86 + sm_120, and the fallback for e
 // Per-architecture tables (P10).  A card whose compute capability (major * 10 + minor) is listed here uses its own table;
 // every other sm_80+ card uses kIlRowsShared.  sm_89 (Ada) has none yet: nobody measured it (we have no such card), so
 // it takes the shared table, which sits between the measured sm_86 and sm_120.  To add one, run
-// `mmvq_il_parity --bench --emit-table` on the card (docs/MMVQ_IL_TABLE.md), paste the printed block as a
+// `mmvq_il_parity --bench --emit-table` on the card (upstream docs/MMVQ_IL_TABLE.md), paste the printed block as a
 // `constexpr IlRows kIlRows_89[]` and add {89, kIlRows_89, sizeof(kIlRows_89) / sizeof(IlRows)} below.  Each choice
 // is bitwise the same output, so a table is only speed.  Without a rebuild: STRATA_MMVQ_IL_ROWS (see il_env_rows).
 // Volta (sm_70): read off mmvq_il_parity --bench on a V100-SXM2-32GB (two runs, mean), the same rule - per cell the

@@ -2599,7 +2599,7 @@ void hc_q8_to_bf16(const void* codes, const float* scales, uint16_t* out, long l
 #if defined(__HIPCC__)
 namespace {
 namespace hcp {
-// Measured on gfx1030 (bench/results/2026-10-12-hc-persist-gfx1030): the gain over the three-kernel read is (1) the down
+// Measured on gfx1030 (upstream bench/results/2026-10-12-hc-persist-gfx1030): the gain over the three-kernel read is (1) the down
 // projection split by column slices over all 80 blocks (the default read runs 41 blocks staging the activations through
 // LDS) and (2) one launch with two grid barriers instead of three launches and the gaps between them.  Prefetching the
 // up weights (into registers or by touching them into L2 / Infinity Cache) and the epilogue inputs measured no gain on

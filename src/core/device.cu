@@ -55,8 +55,8 @@ std::string arch_problem(const cudaDeviceProp& p, int ordinal) {
     const std::string card = "GPU " + std::to_string(ordinal) + " (" + p.name + ", " + arch + ")";
     if (!compiled_for(arch)) {
         return card + " is not an architecture this Strata engine was compiled for (" + STRATA_HIP_ARCHS +
-               "); compile it for this card (./setup.sh --backend hip, or -DCMAKE_HIP_ARCHITECTURES=" + arch +
-               ", docs/AMD_HIP.md) or choose another GPU with HIP_VISIBLE_DEVICES";
+               "); compile it for this card (-DCMAKE_HIP_ARCHITECTURES=" + arch +
+               ") or choose another GPU with HIP_VISIBLE_DEVICES";
     }
     if (p.warpSize != 32) {
         return card + " runs wave" + std::to_string(p.warpSize) + "; Strata's HIP kernels need wave32";

@@ -1,7 +1,7 @@
 // include/strata/kernels/quantize_act.hpp - activation quantization, host-callable (P2.S2).
 //
 // `ggml_mul_mat` converts src1 (the ACTIVATION) to the weight's `vec_dot_type` before the dot product.  The
-// CPU expert path already does this (`bench/micro/cpu_s2.cpp`, int8 + vpdpbusd, parity 1.461e-06); the GPU
+// CPU expert path already does this (upstream's `bench/micro/cpu_s2.cpp`, int8 + vpdpbusd, parity 1.461e-06); the GPU
 // kernels take FP16 activations.  Leaving the two inconsistent means the same token computes different
 // numbers for different experts, so this is the GPU half of the same rule.
 //
@@ -9,7 +9,7 @@
 // GiB pack.  Q8_K is the OTHER HALF of `VEC_DOT_TYPE` (Q3_K/Q4_K/Q5_K/Q6_K/IQ4_XS) and covers 2.89 GiB of
 // dense weights - the attention projections and `ssm_out`, i.e. the numerically sensitive ones.
 //
-// `docs/activation-contract.md` records the decision that BOTH must exist and be used: an FP16 activation
+// upstream's `docs/activation-contract.md` records the decision that BOTH must exist and be used: an FP16 activation
 // against a quantized weight disagrees with the oracle by 0.6-0.9%, which is 6-9x P2.S2's 1e-3 tolerance.
 #pragma once
 
@@ -24,7 +24,7 @@ void quantize_q8_0(const float* x, uint8_t* blocks, int64_t n, void* stream);
 // **R4.2h: THE SAME BLOCKS, PLUS THE CPU's fp32 SCALE - and the CPU's rounding rule with it.**  The engine
 // computes each routed expert twice (misses on the CPU through `act_quant_q8_1`, hits on the GPU through
 // `quantize_q8_0`) and the two disagreed: `ActQ::scale` is fp32 while a `block_q8_0` stores fp16 `d`, which is
-// **4.761e-04 relative on 80 of 80 chunks** (`bench/micro/act_quant_parity.cu`).  This variant exists so the
+// **4.761e-04 relative on 80 of 80 chunks** (upstream's `bench/micro/act_quant_parity.cu`).  This variant exists so the
 // hit path can use the CPU's multiplier.  Writes `blocks[n/32 * 34]` and `scales[n/32]`; `scales` must not be
 // null.  `quantize_q8_0` is unchanged and still matches ggml's bytes, which is what `moe_hit_parity` checks.
 void quantize_q8_0_scaled(const float* x, uint8_t* blocks, float* scales, int64_t n, void* stream);

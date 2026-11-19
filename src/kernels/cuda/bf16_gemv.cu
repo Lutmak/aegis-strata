@@ -93,7 +93,7 @@ void bf16_gemv(const uint16_t* x, const uint16_t* w, float* y, int64_t n_in, int
     //
     // What that costs, from the nsys per-kernel table: **4.66 ms/token across 24 calls, 194 us each** - the
     // third largest kernel in the engine at the time, moving 1.19 GiB/token at ~210 GB/s where a plain read at
-    // this geometry measures 641 GB/s (`bench/micro/p32_floor.cu`).
+    // this geometry measures 641 GB/s (upstream's `bench/micro/p32_floor.cu`).
     //
     // `bf16_gemv_warp_kernel` exists, is checked against this one by `bf16_gemv_parity`, and is coalesced -
     // consecutive lanes touch consecutive addresses - which is the property `gr_read`'s comment records as

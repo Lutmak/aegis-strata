@@ -60,7 +60,7 @@ uint64_t moe_hit_grouped_scratch_bytes(int64_t n_hits, int64_t n_embd, int64_t n
 ///
 ///                  **THIS EXISTS BECAUSE A HIT AND A MISS MUST PRODUCE THE SAME NUMBER.**  The CPU pool
 ///                  multiplies by the fp32 `ActQ::scale` (`cpu/expert.cpp:92`); this kernel read fp16 `d` out
-///                  of the `block_q8_0`.  `bench/micro/act_quant_parity.cu` measured the gap with both real
+///                  of the `block_q8_0`.  upstream's `bench/micro/act_quant_parity.cu` measured the gap with both real
 ///                  implementations linked: **80 of 80 chunks differ, max relative 4.761e-04** - 2^-11, pure
 ///                  fp16 rounding - which is why enabling the cache changed the generated tokens.  Pass null
 ///                  and this is bit-for-bit the kernel `moe_hit_parity` has always checked at 6.279e-08.

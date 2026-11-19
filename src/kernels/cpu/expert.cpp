@@ -1,4 +1,4 @@
-// src/kernels/cpu/expert.cpp - P2.S3: the Q2_0 expert kernel, promoted from bench/micro/cpu_s2.cpp.
+// src/kernels/cpu/expert.cpp - P2.S3: the Q2_0 expert kernel, promoted from upstream bench/micro/cpu_s2.cpp.
 //
 // The body is the validated kernel, moved rather than rewritten: it carries the P0.T2 parity result
 // (rel 1.461e-06 against the ggml formula) and the three performance findings recorded in
@@ -112,7 +112,7 @@ void quantize_oracle_q8_0(const float* x, int n, ActQ& a) {
 
 /// 2-bit unpack via VPMULTISHIFTQB.
 ///
-/// ARGUMENT ORDER IS (control, data) AND WAS DETERMINED EMPIRICALLY (`bench/micro/probe_multishift.cpp`).
+/// ARGUMENT ORDER IS (control, data) AND WAS DETERMINED EMPIRICALLY (upstream's `bench/micro/probe_multishift.cpp`).
 /// The Intel guide states (a=data, b=control); using that produced 43 of 64 wrong codes.  `plan.md`'s sketch
 /// passes the shift pattern first, which is correct - so a "fix" that swapped it to match the guide was the
 /// bug, not the fix.  Within each 64-bit lane, output byte i is `(u16 >> 2i) & 0xFF`, so AND 3 yields the
@@ -420,7 +420,7 @@ void s2_expert_vnni_q(const uint8_t* blob, const ActQ& a1, float* out, ExpertScr
                                 blob + O_GU_SCALES + (size_t) (2 * r) * SC_GU * 2, a1, SC_GU);
         const float u = row_dot(blob + O_GU_CODES + (size_t) (2 * r + 1) * ROW_GU,
                                 blob + O_GU_SCALES + (size_t) (2 * r + 1) * SC_GU * 2, a1, SC_GU);
-        // SiLU on the GATE, multiplied by up - the same reading `docs/semantics.md` records for the shared
+        // SiLU on the GATE, multiplied by up - the same reading upstream's `docs/semantics.md` records for the shared
         // expert, and the one that is wrong the other way round in a way that still produces a number.
         ws.ff[r] = (g / (1.f + std::exp(-g))) * u;
     }
@@ -577,7 +577,7 @@ void s2_expert_vnni_multi(const uint8_t* blob, const ActQ* const* a1, int n_toke
 }
 
 void s2_expert_scalar(const uint8_t* blob, const float* x_in, float* out, bool quant_acts) {
-    // BOTH STAGES, which is what `quant_acts` promises and what `bench/micro/cpu_s2.cpp` does NOT do.
+    // BOTH STAGES, which is what `quant_acts` promises and what upstream's `bench/micro/cpu_s2.cpp` does NOT do.
     //
     // The original's comment says the oracle "consume[s] the SAME INT8 activation values the VNNI path uses,
     // at both stages", but its code quantizes only the INTERMEDIATE - the gate/up projections still see raw

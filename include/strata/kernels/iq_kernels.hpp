@@ -92,7 +92,7 @@ void native_grouped_set_v1(bool v1);
 /// (0 all, 1 gate/up + SwiGLU + quantize, 2 down).
 void native_expert_set_mode(int mode, int phase);
 
-/// EXPDEC (STRATA_EXPDEC=1, docs/EXPERTDEC.md): `native_expert_grouped` stages the group's q8_1 activations in shared
+/// EXPDEC (STRATA_EXPDEC=1, upstream docs/EXPERTDEC.md): `native_expert_grouped` stages the group's q8_1 activations in shared
 /// memory and computes several rows per lane, the same sums per (row, entry) as the default kernels (bitwise), for
 /// gate/up IQ2_XXS / IQ2_XS / IQ3_XXS / IQ3_S / IQ2_S at n_embd 2560 and down IQ4_NL / Q2_0 at n_ff 640; other layouts
 /// keep the default kernels.  Set before graph capture; captured graphs keep the kernels they captured.
@@ -104,7 +104,7 @@ int native_expert_expdec();
 /// from the launch's groups), the auto rule's minimum blocks.  In the setter a field <= 0 (< 0 for the two rows per
 /// block and down_iq4_nl) keeps the current value.
 /// `down` (STRATA_EXPDEC_DOWN, default 0): EXPDEC for the down too; by default only the gate/up (in the engine the
-/// Q2_0 down was ~10% slower with EXPDEC, docs/EXPERTDEC.md par. 7).
+/// Q2_0 down was ~10% slower with EXPDEC, upstream docs/EXPERTDEC.md par. 7).
 struct NativeExpertExpdecParams {
     int gu_rows_per_lane = 0, down_rows_per_lane = 0, gu_min_blocks_per_sm = 0, down_iq4_nl = -1, down = -1;
     int gu_rows_per_block = -1, down_rows_per_block = -1, min_blocks = 0;

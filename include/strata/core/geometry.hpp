@@ -70,7 +70,7 @@ struct ModelGeometry {
 /// The shape the kernels are compiled for.  A kernel that fixes a dimension at compile time asserts it here.
 inline constexpr ModelGeometry kCompiledGeometry{};
 
-/// True for the full-attention layers.  `docs/semantics.md` gives this twice over - `full_attention_interval
+/// True for the full-attention layers.  upstream's `docs/semantics.md` gives this twice over - `full_attention_interval
 /// = 4` and an explicit `attention.compress_ratios` array - and `read_geometry` checks that the two agree.
 inline bool is_qsa_layer(const ModelGeometry& g, int64_t layer) {
     return layer % g.qsa_interval == g.qsa_interval - 1;

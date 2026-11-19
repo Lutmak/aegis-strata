@@ -3,7 +3,7 @@
 // See include/strata/kernels/ple.hpp for the structure and for the `normalized`-is-the-conv-input finding.
 //
 // The legacy arithmetic below follows the captured CPU ggml graph
-// (`bench/micro/ple_in.bin` / `ple_out.bin`, produced by `ple_layer_xcheck.cpp`):
+// (upstream's `bench/micro/ple_in.bin` / `ple_out.bin`, produced by `ple_layer_xcheck.cpp`):
 //
 //   * `rms_norm` accumulates `(double)(x*x)` with the PRODUCT rounded in f32 first - that is literally what
 //     `ggml_compute_forward_rms_norm_f32` does (`sum += (ggml_float)(x[i00]*x[i00])` with `ggml_float` =
@@ -170,7 +170,7 @@ __global__ void add3_kernel(const float* __restrict__ hidden, const float* __res
 }
 
 /// `y[o] = sum_i bf16(x[i]) * bf16(w[o*n_in + i])`.  The weight is BF16 and so is the ACTIVATION, which is
-/// the contract for a BF16 tensor (`docs/activation-contract.md`); with both sides bf16 the products are
+/// the contract for a BF16 tensor (upstream's `docs/activation-contract.md`); with both sides bf16 the products are
 /// exact in f32 and only the summation order differs from ggml's.
 __global__ void bf16_gemv_kernel(const uint16_t* __restrict__ x, const uint16_t* __restrict__ w,
                                  float* __restrict__ y, int n_in, int n_out) {

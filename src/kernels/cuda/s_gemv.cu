@@ -597,8 +597,8 @@ void s_gemv_q8k(const uint8_t* x_q8k, const uint8_t* codes, const float* scales,
         default:
             // 2-bit S2 never has a Q8_K activation: its `vec_dot_type` is Q8_0.  Refusing is better than
             // running a kernel that would be numerically wrong in a way the caller cannot see.
-            std::fprintf(stderr, "s_gemv_q8k: code_bits %d has no Q8_K contract "
-                                 "(S2 uses Q8_0; see docs/activation-contract.md)\n", form.code_bits);
+            std::fprintf(stderr, "s_gemv_q8k: code_bits %d has no Q8_K contract; 2-bit S2's activation type "
+                                 "is Q8_0, not Q8_K\n", form.code_bits);
             std::exit(1);
     }
     finish("s_gemv_q8k", stream);

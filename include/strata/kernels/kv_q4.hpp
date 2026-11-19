@@ -6,7 +6,7 @@
 // over all 256 dimensions, which is what makes 4 bits usable. The query is rotated the same way, so
 // <Hq, Hk> = <q, k> and the scores are unchanged, and the attention output (a mix of rotated values) is rotated
 // back with H (self-inverse). What is lossy is the 4-bit rounding itself: measured, not assumed, in
-// bench/results/2026-09-27-kv-q4.
+// upstream bench/results/2026-09-27-kv-q4.
 //
 // With KV streaming (--kv-resident) the codes live in the host copy and the resident slots like INT8's (KvHostPools
 // k_q4/v_q4, the same block granule), so both options combine.

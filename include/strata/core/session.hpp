@@ -389,7 +389,7 @@ bool session_loop(const ModelGeometry& g, int64_t pos, int32_t pos_base, Session
 // of them per token: measured 48.6 ms/token for 12 ms of GPU kernels and 27 ms of pool.  The token graph holds
 // all 48 layers.  Between `pre[l]` (which rings the doorbell) and the parts copy, a one-thread kernel waits ON
 // THE DEVICE until the host writes the ring value into `db.h_flag`; the host only polls rings, runs the pool
-// and writes flags, with no driver call in the loop (bench/micro/device_wait.cu: 5.2 us per handoff).
+// and writes flags, with no driver call in the loop (upstream bench/micro/device_wait.cu: 5.2 us per handoff).
 //
 //     for l:  pre[l] (.. router, doorbell ring, shared expert)  ->  doorbell_wait  ->  parts <- y_miss (H2D)
 //             ->  post[l] (combine, gr_write)

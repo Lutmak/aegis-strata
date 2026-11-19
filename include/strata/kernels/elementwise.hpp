@@ -12,7 +12,7 @@
 //     `ref/gdn.py` says the two llama.cpp paths apply it in DIFFERENT places, so the caller has to own the
 //     choice rather than have it buried in a kernel.
 //   * `f32_to_f16_bulk` is what lets the f32 arithmetic of the mixer feed the fp16-activation GEMVs.
-//     `docs/activation-contract.md` is explicit that this is NOT the contract for a quantized weight - it is
+//     upstream's `docs/activation-contract.md` is explicit that this is NOT the contract for a quantized weight - it is
 //     the bridge between two stages that both already exist, and the contract decision is a separate one.
 //
 // `silu_inplace` is here because `shared_expert` has its own copy inline and `gdn` needs one for the conv
@@ -95,7 +95,7 @@ void doorbell_ring(uint32_t* d_seq, void* stream);
 /// Plan v0.3 P3 token graph: one thread spins until the host-written `*d_flag` equals the ring value `*d_seq`
 /// (both mapped pinned memory), then fences so everything the host wrote before the flag is visible to the
 /// nodes that follow.  Captured once per layer between `pre[l]` and the parts copy; it is what lets one graph
-/// hold the whole token (bench/micro/device_wait.cu: 5.2 us per handoff, no driver call).
+/// hold the whole token (upstream bench/micro/device_wait.cu: 5.2 us per handoff, no driver call).
 void doorbell_wait(const uint32_t* d_flag, const uint32_t* d_seq, void* stream);
 
 /// Plan v0.3 P3 token graph: copy `n` floats from MAPPED pinned host memory (`src` is its device pointer) into

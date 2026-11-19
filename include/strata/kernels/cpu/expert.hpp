@@ -1,6 +1,6 @@
 // include/strata/kernels/cpu/expert.hpp - P2.S3: the CPU expert path.
 //
-// This is the Q2_0 expert kernel promoted out of `bench/micro/cpu_s2.cpp`, which is the instrument that
+// This is the Q2_0 expert kernel promoted out of upstream's `bench/micro/cpu_s2.cpp`, which is the instrument that
 // measured `c` (Memory/LEDGER.md L9/L10: 15.03 ms for one token's full routed set on 6 cores, DRAM-bound at
 // 44.14 GB/s) and whose P0.T2 parity passes at 1.461e-06.
 //
@@ -173,7 +173,7 @@ void s2_expert_vnni_multi(const uint8_t* blob, const ActQ* const* a1, int n_toke
 /// itself correct.  That separation is the whole point of P0.T2 and it is why this parameter exists rather
 /// than two functions.
 ///
-/// CORRECTION TO THE ORIGINAL: `bench/micro/cpu_s2.cpp`'s comment says "at both stages" but its code
+/// CORRECTION TO THE ORIGINAL: upstream's `bench/micro/cpu_s2.cpp`'s comment says "at both stages" but its code
 /// quantizes only the intermediate, leaving the gate/up projections on raw f32 `x`.  That is invisible when
 /// the caller passes an already-quantized input - which the engine does - and shows up as a ~1.2% gap when it
 /// does not, which reads as a kernel bug and is not one.  This version quantizes both.

@@ -102,7 +102,7 @@ __device__ __forceinline__ float apply_penalties(float logit, int count, const S
 /// **WHY THIS IS A SEPARATE KERNEL AND NOT A BRANCH.**  `sampler_kernel` is launched as a grid over TOKENS
 /// with 64 threads and a `if (t >= n_tokens) return;` at the top.  The decode path has `n_tokens == 1`, so
 /// that launch was `<<<1, 64>>>`, 63 threads exited on the first line, and ONE THREAD walked all 248,320
-/// logits in a dependent loop on one SM of 48.  Measured in isolation (`bench/micro/sampler_cost.cu`):
+/// logits in a dependent loop on one SM of 48.  Measured in isolation (upstream's `bench/micro/sampler_cost.cu`):
 /// **3.11 ms per token**, 5.7% of an ~54 ms token, and the whole of round 309's `sample` phase - the two
 /// synchronisations around it are 0.03 ms each.
 ///
