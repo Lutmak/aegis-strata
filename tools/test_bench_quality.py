@@ -24,6 +24,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import bench_quality as bq
+import bench_switches as bs
 
 
 def row(pos: int, target: int, tlp: float, top: int, toplp: float = 0.0) -> bq.Row:
@@ -266,3 +267,29 @@ class StableSourceTest(unittest.TestCase):
         # most likely to rewrite, and a figure taken before such an edit is not reproducible by the command
         # printed next to it -- which happened, and is why this is pinned.
         self.assertNotEqual(bq.SOURCES["prose"][0], "README.md")
+
+
+class ShortReadCoversTheWholeContextTest(unittest.TestCase):
+    def test_short_read_is_the_shipped_context(self) -> None:
+        # `--short-read N` forces the prompt through the decode windows, the only path the route tail skip is
+        # on. The engine falls back to the batched prefill path for ANY prompt longer than N and says nothing
+        # about it, so a bound below the server's own `--max-context` is a silent scoring hole: every prompt in
+        # the gap is read on a path the skip never consults, and the arm reports zero difference rather than an
+        # error. The two numbers were separate literals and drifted the moment the shipped context changed.
+        # SHORT_READ now derives from the shipped line, so comparing those two would be a tautology; what can
+        # still break is the arm restating the bound itself, which is exactly what it used to do.
+        argv = bs.server_argv()
+        shipped = argv[argv.index("--max-context") + 1]
+        args = bq.quality_arm(7, "probe", Path("/nonexistent/probe.logpos")).engine_args
+        self.assertIn("--short-read", args)
+        self.assertEqual(args[args.index("--short-read") + 1], shipped)
+
+    def test_the_arm_asks_for_the_rank_it_was_given(self) -> None:
+        # The bound is not the only thing the arm has to get right: an arm that measured rank 7 while claiming
+        # rank 3 would produce a quality figure attributed to the wrong setting, which is the error class this
+        # whole harness exists to avoid.
+        for rank in (0, 1, 7, 9):
+            args = bq.quality_arm(rank, "probe", Path("/nonexistent/probe.logpos")).engine_args
+            self.assertEqual(args[args.index("--tail-skip") + 1], str(rank))
+        self.assertEqual(bq.quality_arm(0, "p", Path("/x")).expect, "route tail skip: OFF")
+        self.assertEqual(bq.quality_arm(7, "p", Path("/x")).expect, "route tail skip: ON at rank 7")

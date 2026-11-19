@@ -75,7 +75,7 @@ class ServerArgvTest(unittest.TestCase):
         # `--prefill auto` is not the decode figure of a line that borrows 2.49 GiB instead of 4.00 GiB, and the
         # expert cache is sized against the reserve at load.
         self.assertIn("4096", argv[argv.index("--prefill") + 1])
-        self.assertEqual(argv[argv.index("--max-context") + 1], "98304")
+        self.assertEqual(argv[argv.index("--max-context") + 1], "131072")
         self.assertEqual(argv[argv.index("--vram-reserve-mib") + 1], "1152")
 
     def test_an_arms_engine_arguments_go_after_the_separator(self) -> None:

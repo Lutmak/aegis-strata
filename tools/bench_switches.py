@@ -74,9 +74,10 @@ def server_argv(engine_extra: list[str] | None = None, server_extra: list[str] |
     """The command line the README ships, plus any engine arguments an arm adds.
 
     It used to read `--prefill auto --max-context 32768` and no `--vram-reserve-mib`, which is not what anybody
-    runs: the README ships `--prefill 4096 --max-context 98304 --vram-reserve-mib 1152`, and those three are not
-    cosmetic -- the chunk size costs about 17% of prompt speed and is what keeps the VRAM floor off the paging
-    band, and the expert cache is sized against the reserve at load. So every figure this tool produced described
+    runs: the README ships `--prefill 4096 --max-context 131072 --vram-reserve-mib 1152`, and those three are not
+    cosmetic -- the chunk size costs some prompt speed and is what keeps the VRAM floor off the paging band, which
+    at a 128K context is the difference between an answer and `cudaMalloc out of memory` mid-request, and the
+    expert cache is sized against the reserve at load. So every figure this tool produced described
     a configuration no operator uses, and a decode figure measured at a 4 GiB prompt borrow is not the decode
     figure of a line that borrows 2.49 GiB. Measuring what ships is the whole point of the harness.
     """
@@ -96,7 +97,7 @@ def server_argv(engine_extra: list[str] | None = None, server_extra: list[str] |
         "--expert-cache", "auto", "--prefill", "4096",
         "--spec", "4", "--spec-min-p", "0.5",
         "--mtp", str(MODELS / "mtp/rt"),
-        "--max-context", "98304", "--kv", "int8", "--ple-io", "direct", "--kv-grow",
+        "--max-context", "131072", "--kv", "int8", "--ple-io", "direct", "--kv-grow",
         "--vram-reserve-mib", "1152", "--pool-workers", "15", "--gpu", "0",
         *(engine_extra or []),
     ]

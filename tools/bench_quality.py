@@ -60,9 +60,16 @@ from bench_switches import (  # noqa: E402  (the path insert above has to come f
     SHARD1,
     SHARD2,
     gpu_is_idle,
+    server_argv,
     start,
     Arm,
 )
+
+# The `--short-read` bound below, read off the shipped command line rather than written out again. The two were
+# separate literals until the shipped context changed and only one of them moved, which is a silent scoring hole
+# rather than an error -- see the comment at its use site.
+_SHIPPED = server_argv()
+SHORT_READ = _SHIPPED[_SHIPPED.index("--max-context") + 1]
 
 # The text to score, and where it comes from. Prose and code, because upstream found the cost uneven across
 # them -- code and reasoning prompts moved least, chat and non-English most -- and a coding agent is what this
@@ -250,6 +257,28 @@ def prompt_tokens_read(log_text: str) -> tuple[int, int]:
     return int(done[-1][0]), int(done[-1][1]) if done[-1][1] else 0
 
 
+def quality_arm(rank: int, name: str, logpos: Path) -> Arm:
+    """The arm one rank is measured with. Pure, so what the engine is actually asked for can be read in a test.
+
+    It was inline in `run_arm`, which starts a server in the same breath, so the only way to see the flags this
+    harness measures with was to own the card and read a log afterwards.
+    """
+    return Arm(
+        name=name,
+        env={"STRATA_LOGPOS": str(logpos)},
+        # --short-read makes the engine read the prompt through the decode windows, which is the only path the
+        # skip is on; the batched prefill path never consults it. It is the whole context (SHORT_READ, taken
+        # from the shipped line so the two cannot drift) rather than the prompt's expected length, because the
+        # engine falls back to the batched path for ANY prompt longer than the bound and says nothing about it:
+        # a 2,048-token estimate against a 2,441-token prompt scored zero positions and the only symptom was an
+        # empty output file. --adapt-every 0 holds the expert cache still, so the two arms miss the same experts
+        # instead of the adaptive tier re-ranking residency differently under each and mixing a second effect
+        # into the difference.
+        engine_args=["--tail-skip", str(rank), "--short-read", SHORT_READ, "--adapt-every", "0"],
+        expect=f"route tail skip: {'OFF' if rank == 0 else f'ON at rank {rank}'}",
+    )
+
+
 def run_arm(rank: int, prompt: str, logdir: Path, name: str) -> tuple[list[Row], str, int]:
     """One arm: a fresh server at this rank, one request, and the rows it scored."""
     # The scores go in a subdirectory of their own, because that subdirectory is what the engine is granted
@@ -260,19 +289,7 @@ def run_arm(rank: int, prompt: str, logdir: Path, name: str) -> tuple[list[Row],
     scores.mkdir(parents=True, exist_ok=True)
     logpos = (scores / f"{name}.logpos").resolve()
     logpos.unlink(missing_ok=True)
-    arm = Arm(
-        name=name,
-        env={"STRATA_LOGPOS": str(logpos)},
-        # --short-read makes the engine read the prompt through the decode windows, which is the only path the
-        # skip is on; the batched prefill path never consults it. It is set to the whole context rather than to
-        # the prompt's expected length, because the engine falls back to the batched path for ANY prompt longer
-        # than the bound and says nothing about it: a 2,048-token estimate against a 2,441-token prompt scored
-        # zero positions and the only symptom was an empty output file. --adapt-every 0 holds the expert cache
-        # still, so the two arms miss the same experts instead of the adaptive tier re-ranking residency
-        # differently under each and mixing a second effect into the difference.
-        engine_args=["--tail-skip", str(rank), "--short-read", "98304", "--adapt-every", "0"],
-        expect=f"route tail skip: {'OFF' if rank == 0 else f'ON at rank {rank}'}",
-    )
+    arm = quality_arm(rank, name, logpos)
     # The engine is contained, so it cannot write where it likes: without this the fopen fails, logpos stays
     # nullptr and the engine scores nothing at all -- silently, because it has nowhere to say so.
     srv_extra = ["--sandbox-allow-write", str(logpos.parent)]
