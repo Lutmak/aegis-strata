@@ -58,6 +58,7 @@ FALLBACK_ANSWERABLE = (
     "server/tests/literals_test.cpp", "server/tests/picture_cache_test.cpp",
     "server/tests/sandbox_test.cpp", "server/tests/e2e.sh",
     "tools/check_docs.py", "tools/bench_switches.py", "tools/collect_profile_traces.py",
+    "tools/test_bench_switches.py", "tools/bench_quality.py", "tools/test_bench_quality.py",
     "src/core/nv_defaults.cpp", "include/strata/core/nv_defaults.hpp", "src/core/nv_defaults_test.cpp",
     "src/core/tail_skip.cpp", "include/strata/core/tail_skip.hpp", "src/core/tail_skip_test.cpp",
 )
@@ -502,6 +503,16 @@ def main() -> int:
             problems.append(f"server/strata_sandbox.cpp: kKilled[] has {len(killed)} entries but the "
                             f"built filter reports {want_kills}")
 
+    # Said on every run, not only under --list, because this is the one fact that changes how much the gate
+    # covers. With no .git the "files this fork edits" set is a hand-written fallback list instead of a diff
+    # against the import, and it is less than half the size -- so the path:line ban this checker exists to
+    # enforce stops covering most of the files it should, and `make test` passed either way without a word.
+    # A citation added to one of those files would then fail only on a machine that has the history.
+    if not run_git("rev-parse", "HEAD"):
+        print(f"check_docs: NO GIT HISTORY here, so 'files this fork edits' is the fallback list in this file "
+              f"({len(mine)} files) and not a diff against the import. Everything outside it is unchecked for "
+              f"path:line citations. This is expected in an extracted source tree; on a clone, run "
+              f"`git submodule update --init` and check you are inside the repository.")
     if listing:
         print(f"check_docs: {len(ours)} files authored here, {len(mine)} edited here, "
               f"of {len(tracked)} tracked "

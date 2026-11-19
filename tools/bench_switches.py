@@ -29,6 +29,7 @@ import hashlib
 import json
 import os
 import re
+import shlex
 import signal
 import subprocess
 import sys
@@ -69,7 +70,16 @@ SM86_SWITCHES: dict[str, str] = {
 }
 
 
-def server_argv() -> list[str]:
+def server_argv(engine_extra: list[str] | None = None, server_extra: list[str] | None = None) -> list[str]:
+    """The command line the README ships, plus any engine arguments an arm adds.
+
+    It used to read `--prefill auto --max-context 32768` and no `--vram-reserve-mib`, which is not what anybody
+    runs: the README ships `--prefill 4096 --max-context 98304 --vram-reserve-mib 1152`, and those three are not
+    cosmetic -- the chunk size costs about 17% of prompt speed and is what keeps the VRAM floor off the paging
+    band, and the expert cache is sized against the reserve at load. So every figure this tool produced described
+    a configuration no operator uses, and a decode figure measured at a 4 GiB prompt borrow is not the decode
+    figure of a line that borrows 2.49 GiB. Measuring what ships is the whole point of the harness.
+    """
     return [
         str(PROJECT / "build/bin/aegis"),
         "--engine", str(PROJECT / "build/bin/strata"),
@@ -77,16 +87,18 @@ def server_argv() -> list[str]:
         "--host", "127.0.0.1", "--port", str(PORT),
         "--alias", "qwen3.8-flash-next-iq3_xxs",
         "--sse-ping-interval", "10",
+        *(server_extra or []),
         "--",
         "--pack", str(MODELS / "pack-iq3-xxs"),
         "--native", str(SHARD1),
         "--ple-gguf", str(SHARD2),
         "--expert-profile", str(PROJECT / "data/expert-profile.bin"),
-        "--expert-cache", "auto", "--prefill", "auto",
+        "--expert-cache", "auto", "--prefill", "4096",
         "--spec", "4", "--spec-min-p", "0.5",
         "--mtp", str(MODELS / "mtp/rt"),
-        "--max-context", "32768", "--kv", "int8", "--ple-io", "direct", "--kv-grow",
-        "--pool-workers", "15", "--gpu", "0",
+        "--max-context", "98304", "--kv", "int8", "--ple-io", "direct", "--kv-grow",
+        "--vram-reserve-mib", "1152", "--pool-workers", "15", "--gpu", "0",
+        *(engine_extra or []),
     ]
 
 
@@ -194,26 +206,72 @@ def parse_with(pairs: list[str] | None) -> dict[str, str]:
     out: dict[str, str] = {}
     for item in pairs or []:
         key, sep, value = item.partition("=")
-        if not sep or not key.startswith("STRATA_"):
-            raise SystemExit(f"--with: expected STRATA_KEY=VALUE, got {item!r}")
+        # `STRATA_` alone is not a switch name. It mattered more than it looks: the "did this arm take effect"
+        # proof falls back to matching the name without its prefix, and an empty suffix made that fallback
+        # match any log at all, so `--with STRATA_=1` passed as a switch the engine had honoured.
+        if not sep or not key.startswith("STRATA_") or key == "STRATA_":
+            raise SystemExit(f"--with: expected STRATA_KEY=VALUE with a name after the prefix, got {item!r}")
         # An empty value is how a shell turns one of this engine's switches OFF (nv_defaults.cpp documents
         # STRATA_SM86_PERF= as exactly that), so `--with STRATA_X=` would measure the default path twice and report
         # the agreement as a measurement of STRATA_X.
-        if value == "":
-            raise SystemExit(f"--with: {key} needs a value; an empty one turns most of these switches off, so the "
-                             f"'with' arm would be the same as 'on'")
+        #
+        # "0" is the OTHER way these switches are turned off, and refusing the empty value while accepting it was
+        # half a guard. Worse than half: the "with" arm is built as `on`'s table | with_vars, so with_vars wins,
+        # and `--drop X --with STRATA_Y=0` produced an arm that is the default table MINUS a switch while the
+        # summary labelled it "the default path plus one more setting". The two arms then differ by the opposite
+        # of what the run claims to measure.
+        if value == "" or value == "0":
+            raise SystemExit(f"--with: {key}={value!r} turns a switch off, and this arm is 'the default path plus "
+                             f"one setting': it would be the default path MINUS one, labelled as plus one. To "
+                             f"measure what a switch is worth, drop it from the default arm with --drop {key}.")
         if key in out:
             raise SystemExit(f"--with: {key} given twice")
         out[key] = value
     return out
 
 
-def arms_for(drop: str | None, with_vars: dict[str, str] | None = None) -> dict[str, dict[str, str]]:
-    """The environments to compare.
+@dataclass
+class Arm:
+    """One side of a comparison: the environment, the engine arguments, and how to prove it took effect.
 
-    "on" is deliberately EMPTY: the engine applies its own sm_86 table, so this measures the default path a user
-    gets rather than a hand-built environment that happens to name the same variables. assert_default_applied()
-    then checks the engine said so.
+    Engine arguments are here because not every setting is an environment variable any more. The route tail skip
+    is `--tail-skip N` on the engine's own command line, and an arm that could only set variables had no way to
+    drive it -- which is how this tool ended up unable to measure the one setting in the engine that changes how
+    much of the model runs.
+    """
+    name: str
+    env: dict[str, str] = field(default_factory=dict)
+    engine_args: list[str] = field(default_factory=list)
+    expect: str | None = None   # a string the engine's log must contain, or this arm measured something else
+
+
+def parse_with_args(items: list[str] | None) -> list[str]:
+    """`--with-arg "--tail-skip 7"` (repeatable): extra arguments for the ENGINE in the "with" arm.
+
+    One quoted string per option rather than one token per option, for a dull but unavoidable reason: argparse
+    reads a value that begins with `-` as another option, so `--with-arg --tail-skip` fails before this function
+    is reached. A value with a space in it is passed through, which is why the flag and its value travel together.
+    Split with shlex, so a quoted path with a space in it survives.
+    """
+    out: list[str] = []
+    for item in items or []:
+        parts = shlex.split(item)
+        if not parts:
+            raise SystemExit(f"--with-arg: expected an engine argument, got {item!r}")
+        if not parts[0].startswith("-"):
+            raise SystemExit(f"--with-arg: {parts[0]!r} is not an option; write the flag and its value together, "
+                             f'as --with-arg "--tail-skip 7"')
+        out += parts
+    return out
+
+
+def arms_for(drop: str | None, with_vars: dict[str, str] | None = None,
+             with_args: list[str] | None = None, expect: str | None = None) -> dict[str, Arm]:
+    """The arms to compare.
+
+    "on" is deliberately EMPTY of environment: the engine applies its own sm_86 table, so this measures the
+    default path a user gets rather than a hand-built environment that happens to name the same variables.
+    assert_default_applied() then checks the engine said so.
 
     With --drop KEY the comparison changes to "the full table minus KEY" against "the full table", which is what
     the per-switch column in docs/speed.md actually reports. Without this the only possible off arm was
@@ -221,17 +279,18 @@ def arms_for(drop: str | None, with_vars: dict[str, str] | None = None) -> dict[
     all -- they could only measure a subset against nothing.
     """
     if drop is None:
-        arms = {"off": {"STRATA_SM86_PERF": "0"}, "on": {}}
+        arms = {"off": Arm("off", env={"STRATA_SM86_PERF": "0"}), "on": Arm("on")}
     elif drop not in SM86_SWITCHES:
         raise SystemExit(f"--drop: {drop} is not in the table; choose from {', '.join(sorted(SM86_SWITCHES))}")
     else:
         minus = {k: v for k, v in SM86_SWITCHES.items() if k != drop}
-        arms = {"off": minus, "on": dict(SM86_SWITCHES)}
-    # "with" is the "on" arm plus --with: the default path a user gets, and one more switch on top of it, so the
-    # pair isolates that switch and nothing else.  Named only when --with was given, so `--arms with` without it
-    # fails as an unknown arm instead of silently measuring "on" twice.
-    if with_vars:
-        arms["with"] = arms["on"] | with_vars
+        arms = {"off": Arm("off", env=minus), "on": Arm("on", env=dict(SM86_SWITCHES))}
+    # "with" is the "on" arm plus whatever --with and --with-arg named: the default path a user gets, and one more
+    # setting on top of it, so the pair isolates that setting and nothing else.  Named only when one of them was
+    # given, so `--arms with` without them fails as an unknown arm instead of silently measuring "on" twice.
+    if with_vars or with_args:
+        arms["with"] = Arm("with", env=arms["on"].env | (with_vars or {}),
+                           engine_args=list(with_args or []), expect=expect)
     return arms
 
 
@@ -253,7 +312,7 @@ def assert_default_applied(srv: "Server", arm: str, drop: str | None) -> None:
         )
 
 
-def assert_with_took_effect(srv: "Server", arm: str, with_vars: dict[str, str]) -> None:
+def assert_with_took_effect(srv: "Server", arm: Arm) -> None:
     """On a "with" arm, fail unless the engine said something about each switch the arm added.
 
     The arm's whole claim is "the default path, plus this switch". Nothing checked that the switch did anything, and
@@ -267,10 +326,23 @@ def assert_with_took_effect(srv: "Server", arm: str, with_vars: dict[str, str]) 
     habit for the sm_86 table). A switch that announces nothing cannot be measured by this tool without being taught
     here, and failing is the right answer then: a silent arm is not evidence.
     """
-    if arm != "with" or not with_vars:
+    if arm.name != "with":
         return
     text = srv.log.read_text(errors="replace")
-    silent = [k for k in with_vars if k not in text and k.removeprefix("STRATA_") not in text]
+    # `KEY=`, not `KEY`. Bare substring containment was the wrong test in three ways at once, and a gauntlet run
+    # demonstrated all three: `STRATA_SM86_PER=1` (the real name with one letter dropped -- the exact typo this
+    # docstring claims to catch) passed, because it is a prefix of a switch the engine does mention; so did
+    # `STRATA_S=1`; and so did `STRATA_=1`, because `"" in text` is true of every log ever written. Each of them
+    # sets a variable the engine never reads, which is an arm that measured the default path a second time and
+    # then reported "the switch is worth nothing".
+    # The second clause exists because the engine sometimes names a switch without its prefix (the sm_86 line
+    # lists `ADAPT_NOWAIT ADAPT_LAG ...`). It has to require a non-empty suffix: for the key `STRATA_` the
+    # suffix is "", so the test degenerated to `"=" in text`, which is true of every log that names anything.
+    silent = [
+        k for k in arm.env
+        if f"{k}=" not in text
+        and not (k.removeprefix("STRATA_") and f"{k.removeprefix('STRATA_')}=" in text)
+    ]
     if silent:
         raise RuntimeError(
             f"the 'with' arm set {', '.join(silent)} and the engine never mentioned {'it' if len(silent) == 1 else 'them'}: "
@@ -278,14 +350,48 @@ def assert_with_took_effect(srv: "Server", arm: str, with_vars: dict[str, str]) 
             f"the switch is worth. Check the spelling and the value, and that this card and build have the code behind "
             f"it. See {srv.log}"
         )
+    # An engine argument announces itself in whatever words the engine chose, so the caller states the words with
+    # --expect and this checks for them. It is required alongside --with-arg rather than optional, because the
+    # failure it catches is the one that looks like a result: an arm whose setting never arrived measures the
+    # other arm a second time, the two agree, and "no difference" reads as "the setting is worth nothing".
+    if arm.engine_args and arm.expect and arm.expect not in text:
+        raise RuntimeError(
+            f"the 'with' arm passed {' '.join(arm.engine_args)} to the engine and its log never contains "
+            f"{arm.expect!r}: this arm did not run the configuration it claims to, so comparing it against 'on' "
+            f"would describe something else. See {srv.log}"
+        )
 
 
-def start(env_extra: dict[str, str], log: Path, ready_timeout: float = 240.0) -> Server:
-    env = os.environ | env_extra
+def assert_expect_discriminates(expect: str, baseline_log: Path) -> None:
+    """Fail unless `--expect` is absent from the arm that did NOT get the engine argument.
+
+    `--expect TEXT` proves an argument arrived only if TEXT is something the engine says when it arrived and
+    does not say otherwise. A string that appears in both arms' logs proves nothing, and the natural choice
+    often is one: this engine announces the route tail skip in every outcome now, and three of the four lines --
+    including the two refusals and the OFF default -- quote `--tail-skip 7` in their explanatory prose. So
+    `--with-arg "--tail-skip 7" --expect "--tail-skip 7"`, which is what an operator types first because it
+    echoes the flag, passed on an arm where the skip was off. Both arms then ran the complete model, agreed, and
+    the summary read "the setting is worth nothing".
+
+    Checked here rather than against a word list, because the property is general: whether the string separates
+    the two arms is a question about this run's own logs, and this run has both.
+    """
+    if expect and expect in baseline_log.read_text(errors="replace"):
+        raise RuntimeError(
+            f"--expect {expect!r} also appears in the log of the arm that did NOT get the engine argument "
+            f"({baseline_log}), so it does not prove the argument arrived and this pair cannot be trusted. Pick "
+            f"a string the engine prints only when the setting is active -- for the route tail skip that is "
+            f"\"route tail skip: ON at rank N\", not the flag's own name, which its OFF line also quotes."
+        )
+
+
+def start(arm: Arm, log: Path, ready_timeout: float = 240.0,
+          server_extra: list[str] | None = None) -> Server:
+    env = os.environ | arm.env
     log.parent.mkdir(parents=True, exist_ok=True)
     handle = log.open("w")
     proc = subprocess.Popen(
-        server_argv(), stdout=handle, stderr=subprocess.STDOUT,
+        server_argv(arm.engine_args, server_extra), stdout=handle, stderr=subprocess.STDOUT,
         cwd=PROJECT, env=env, start_new_session=True,
     )
     srv = Server(proc=proc, log=log)
@@ -334,10 +440,29 @@ def completion(srv: Server, prompt: str, max_tokens: int, timeout: float = 600.0
     raise RuntimeError("no DONE line appeared in the server log for this request")
 
 
-DECODE_PROMPT = (
-    "Explain, in careful detail and without using lists, how a modern operating system "
-    "schedules threads onto CPU cores, and why that design is the way it is."
-)
+# Decode prompts, by the kind of work they ask for. One prompt is not enough for a decode figure on this engine
+# and that is not a matter of noise: within a sitting every arm here repeats its answer exactly, but across
+# sittings the same configuration settled on a DIFFERENT continuation, and the two differed in how draftable they
+# were -- 151 of 225 drafts accepted against 133 of 254 -- which moved the arm's rate by 13%. A gap measured on
+# one prompt is a gap for that continuation. Upstream reports its own tail-skip figures per prompt kind for the
+# same reason (a story, a code answer, and an answer after a long document), so these three mirror theirs and the
+# numbers can be read side by side.
+DECODE_PROMPTS: dict[str, str] = {
+    "story": (
+        "Write a short story about a lighthouse keeper who discovers that the light has been answering "
+        "someone. Keep it to a few hundred words and do not use lists."
+    ),
+    "prose": (
+        "Explain, in careful detail and without using lists, how a modern operating system "
+        "schedules threads onto CPU cores, and why that design is the way it is."
+    ),
+    "code": (
+        "Write a C++ function that takes a sorted vector of integers and a target, and returns the range of "
+        "indices whose values equal the target, as a pair of iterators. Explain the invariant your loop "
+        "maintains, then say what it does when the target is absent and why that is the right answer."
+    ),
+}
+DECODE_PROMPT = DECODE_PROMPTS["prose"]   # the one the published figures were taken at before `--prompt` existed
 
 
 def filler(approx_tokens: int, salt: int = 0) -> str:
@@ -371,56 +496,113 @@ def fmt(xs: list[float]) -> str:
     return ", ".join(f"{x:.1f}" for x in xs) + f"  -> mean {mean:.2f}"
 
 
+def arm_facts(srv: Server) -> str:
+    """What the engine said about the things that decide a decode rate, so a row carries its own context.
+
+    Decode speed here is mostly a question of how often a routed expert is not in the GPU cache and what the
+    engine does about it, and all three of those come out of the engine's own log. Without them a pair of numbers
+    is uninterpretable six months later: the same two arms on the same card give different gaps at different
+    cache hit rates, and the hit rate depends on the profile, the context and the reserve.
+    """
+    text = srv.log.read_text(errors="replace")
+    bits = []
+    m = re.search(r"expert cache (\d+) slots", text)
+    if m:
+        bits.append(f"slots={m[1]}")
+    hits = re.findall(r"decode expert cache hit rate: ([\d.]+)%", text)
+    if hits:
+        bits.append(f"hit={hits[-1]}%")
+    skips = re.findall(r"route tail skip: (\d+) missed experts skipped \((\d+) entries\)", text)
+    bits.append(f"skipped={skips[-1][1]} entries" if skips else "skipped=0 entries")
+    m = re.search(r"route tail skip: (OFF|ON at rank \d+)", text)
+    if m:
+        bits.append(f"tail_skip={m[1]}")
+    return "  ".join(bits)
+
+
 def cmd_decode(args: argparse.Namespace) -> int:
     logdir = Path(args.logdir)
-    arms = arms_for(getattr(args, "drop", None), parse_with(getattr(args, "with_", None)))
-    results: dict[str, list[Sample]] = {"off": [], "on": []}
+    arms = arms_for(getattr(args, "drop", None), parse_with(getattr(args, "with_", None)),
+                    parse_with_args(getattr(args, "with_arg", None)), getattr(args, "expect", None))
+    # Exactly two arms, because what this subcommand does is a PAIRED comparison: it alternates which arm leads so
+    # that a machine warming or cooling cannot favour one, and compares differences within a pair. Three arms have
+    # no pairs, and averaging them separately would throw away the only thing that makes the small deltas here
+    # trustworthy -- docs/speed.md records a 1.6% drift between sittings against a 0.3-0.4% spread inside one.
+    wanted = [a for a in args.arms.split(",") if a]
+    if len(wanted) != 2 or wanted[0] == wanted[1]:
+        print(f"--arms: name exactly two different arms, got {args.arms!r}; this run has "
+              f"{', '.join(sorted(arms))}", file=sys.stderr)
+        return 2
+    a_name, b_name = wanted
+    results: dict[str, list[Sample]] = {a_name: [], b_name: []}
     order: list[str] = []
     for i in range(args.pairs):
         # Alternate which arm leads, so a warming or cooling trend cannot favour one.
-        order += ["off", "on"] if i % 2 == 0 else ["on", "off"]
+        order += [a_name, b_name] if i % 2 == 0 else [b_name, a_name]
 
-    peak = {"off": 0, "on": 0}
-    for n, arm in enumerate(order, 1):
-        print(f"[{n}/{len(order)}] arm={arm} starting server ...", flush=True)
-        srv = start(arms[arm], logdir / f"{n:02d}-{arm}.log")
+    # -1, not 0: a failed nvidia-smi read leaves Server.peak_vram_mib at -1 and says so in its docstring, and
+    # max(0, -1) turned that into "peak VRAM 0 MiB" printed as a finished measurement -- in the summary line,
+    # which is the one that gets copied into docs/speed.md's VRAM column.
+    peak = {a_name: -1, b_name: -1}
+    facts: dict[str, str] = {}
+    arm_logs: dict[str, Path] = {}
+    for n, name in enumerate(order, 1):
+        arm = arms[name]
+        print(f"[{n}/{len(order)}] arm={name} starting server ...", flush=True)
+        srv = start(arm, logdir / f"{n:02d}-{name}.log")
+        arm_logs[name] = srv.log
         try:
-            assert_default_applied(srv, arm, getattr(args, "drop", None))
-            # One discarded warm-up request: the first decode after load is not representative.
+            assert_default_applied(srv, name, getattr(args, "drop", None))
+            # One discarded warm-up request: the first decode after a model load is not representative.
             completion(srv, "Say the word ready.", 8)
-            s = completion(srv, DECODE_PROMPT, args.max_tokens)
-            results[arm].append(s)
-            peak[arm] = max(peak[arm], srv.peak_vram_mib)
+            s = completion(srv, DECODE_PROMPTS[args.prompt], args.max_tokens)
+            results[name].append(s)
+            peak[name] = srv.peak_vram_mib if peak[name] < 0 else max(peak[name], srv.peak_vram_mib)
+            # After the requests, not at start-up: the skip's counter and the cache hit rate only exist once
+            # something has been decoded, and the tail-skip line is the engine's proof the arm ran what it claims.
+            assert_with_took_effect(srv, arm)
+            baseline = next((o for o in (a_name, b_name) if not arms[o].engine_args), None)
+            if arm.engine_args and arm.expect and baseline and baseline in arm_logs:
+                assert_expect_discriminates(arm.expect, arm_logs[baseline])
+            facts[name] = arm_facts(srv)
             print(
                 f"    decode {s.decode_tps:7.2f} tok/s   produced={s.produced} "
                 f"finish={s.finish} drafts={s.drafts_accepted}/{s.drafts_offered} "
                 f"vram={srv.peak_vram_mib} MiB sha={s.text_sha}",
                 flush=True,
             )
+            print(f"    {facts[name]}", flush=True)
         finally:
             srv.stop()
 
-    print("\n=== decode, interleaved A/B ===")
-    for arm in ("off", "on"):
-        print(f"{arm:>4}: {fmt([s.decode_tps for s in results[arm]])}   peak VRAM {peak[arm]} MiB")
-    off = [s.decode_tps for s in results["off"]]
-    on = [s.decode_tps for s in results["on"]]
+    print(f"\n=== decode, interleaved A/B, prompt={args.prompt} ===")
+    for name in (a_name, b_name):
+        vram = f"peak VRAM {peak[name]} MiB" if peak[name] >= 0 else "peak VRAM not measured (nvidia-smi failed)"
+        print(f"{name:>5}: {fmt([s.decode_tps for s in results[name]])}   {vram}")
+        print(f"       {facts.get(name, '(nothing recorded)')}")
+    off = [s.decode_tps for s in results[a_name]]
+    on = [s.decode_tps for s in results[b_name]]
     if not off or not on:
         # Exit 2, not 0. `--pairs 0` used to start no server, measure nothing, print "-" for both arms and
         # return success -- and the one line a reader checks, "identical output across arms", simply vanished
         # rather than saying it was not determined.
-        print(f"\nmeasured nothing: off={len(off)} samples, on={len(on)} samples. "
+        print(f"\nmeasured nothing: {a_name}={len(off)} samples, {b_name}={len(on)} samples. "
               f"--pairs must be at least 1.", file=sys.stderr)
         return 2
-    if True:
-        m_off, m_on = sum(off) / len(off), sum(on) / len(on)
-        print(f"\nmean off {m_off:.2f}  mean on {m_on:.2f}  delta {m_on - m_off:+.2f} tok/s "
-              f"({100 * (m_on - m_off) / m_off:+.2f}%)")
-        shas = {arm: {s.text_sha for s in results[arm]} for arm in ("off", "on")}
-        print(f"output sha off={shas['off']} on={shas['on']}")
-        print("identical output across arms: " + ("YES" if shas["off"] == shas["on"] and len(shas["off"]) == 1 else "NO"))
+    m_off, m_on = sum(off) / len(off), sum(on) / len(on)
+    print(f"\nmean {a_name} {m_off:.2f}  mean {b_name} {m_on:.2f}  delta {m_on - m_off:+.2f} tok/s "
+          f"({100 * (m_on - m_off) / m_off:+.2f}%)")
+    # How many pairs went the same way, which is the only thing that makes a difference this small readable. A
+    # mean on its own hides "three pairs one way and one the other".
+    pairs = list(zip(off, on))
+    favour = sum(1 for x, y in pairs if y > x)
+    print(f"pairs in favour of {b_name}: {favour} of {len(pairs)}")
+    shas = {name: {s.text_sha for s in results[name]} for name in (a_name, b_name)}
+    print(f"output sha {a_name}={shas[a_name]} {b_name}={shas[b_name]}")
+    print("identical output across arms: " +
+          ("YES" if shas[a_name] == shas[b_name] and len(shas[a_name]) == 1 else "NO"))
     Path(args.out).write_text(json.dumps(
-        {arm: [vars(s) | {"decode_tps": s.decode_tps} for s in results[arm]] for arm in results}, indent=2))
+        {name: [vars(s) | {"decode_tps": s.decode_tps} for s in results[name]] for name in results}, indent=2))
     print(f"raw samples -> {args.out}")
     return 0
 
@@ -428,13 +610,14 @@ def cmd_decode(args: argparse.Namespace) -> int:
 def cmd_prefill(args: argparse.Namespace) -> int:
     logdir = Path(args.logdir)
     targets = [int(t) for t in args.tokens.split(",")]
-    arms = arms_for(getattr(args, "drop", None), parse_with(getattr(args, "with_", None)))
+    arms = arms_for(getattr(args, "drop", None), parse_with(getattr(args, "with_", None)),
+                    parse_with_args(getattr(args, "with_arg", None)), getattr(args, "expect", None))
     out: dict[str, dict[int, list[Sample]]] = {}
     wanted = args.arms.split(",")
     unknown = [a for a in wanted if a not in arms]
     if unknown:
-        raise SystemExit(f"--arms: no such arm {', '.join(unknown)}; this run has {', '.join(sorted(arms))}"
-                         f"{' (name one with --with to get a \'with\' arm)' if 'with' not in arms else ''}")
+        hint = "" if "with" in arms else " (name one with --with to get a 'with' arm)"
+        raise SystemExit(f"--arms: no such arm {', '.join(unknown)}; this run has {', '.join(sorted(arms))}{hint}")
     for arm in wanted:
         print(f"arm={arm} starting server ...", flush=True)
         srv = start(arms[arm], logdir / f"prefill-{arm}.log")
@@ -463,7 +646,7 @@ def cmd_prefill(args: argparse.Namespace) -> int:
                 out[arm][real] = reps
             # After the requests, not beside assert_default_applied: a prompt-path switch is announced on its first
             # use, so at startup the log is silent about it even when everything is right.
-            assert_with_took_effect(srv, arm, parse_with(getattr(args, "with_", None)))
+            assert_with_took_effect(srv, arms[arm])
         finally:
             srv.stop()
 
@@ -495,6 +678,21 @@ def main() -> int:
                         "own defaults against STRATA_SM86_PERF=0")
     d.add_argument("--pairs", type=int, default=4)
     d.add_argument("--max-tokens", type=int, default=256)
+    # The two arms to pair. Decode is where the route tail skip lives, and it could not be measured here at all
+    # before: --with and --arms existed on `prefill` only, and --drop refuses any key outside the sm_86 table.
+    d.add_argument("--arms", default="off,on",
+                   help="the two arms to pair, e.g. 'on,with' for the default path against the default path plus "
+                        "whatever --with / --with-arg added")
+    d.add_argument("--with", dest="with_", metavar="STRATA_KEY=VALUE", action="append",
+                   help="add an environment variable to the 'with' arm (repeatable); name it in --arms to measure it")
+    d.add_argument("--with-arg", metavar="ARG", action="append",
+                   help='add arguments to the ENGINE\'s command line in the \'with\' arm (repeatable), as one '
+                        'quoted string per option, e.g. --with-arg "--tail-skip 7"; needs --expect')
+    d.add_argument("--expect", metavar="TEXT",
+                   help="text the 'with' arm's engine log must contain, proving --with-arg took effect")
+    d.add_argument("--prompt", default="prose", choices=sorted(DECODE_PROMPTS),
+                   help="which kind of answer to time (default prose). A gap measured on one prompt is a gap for "
+                        "that continuation; run all three before quoting one number")
     d.add_argument("--out", default="bench-decode.json")
     d.set_defaults(func=cmd_decode)
 
@@ -508,6 +706,11 @@ def main() -> int:
     # `--arms on,with --with STRATA_IQ4_W4A8=2` is the default path against the default path plus that kernel.
     f.add_argument("--with", dest="with_", metavar="STRATA_KEY=VALUE", action="append",
                    help="add a variable to the 'with' arm (repeatable); name it in --arms to measure it")
+    f.add_argument("--with-arg", metavar="ARG", action="append",
+                   help='add arguments to the ENGINE\'s command line in the \'with\' arm (repeatable), as one '
+                        'quoted string per option; needs --expect')
+    f.add_argument("--expect", metavar="TEXT",
+                   help="text the 'with' arm's engine log must contain, proving --with-arg took effect")
     f.add_argument("--out", default="bench-prefill.json")
     f.set_defaults(func=cmd_prefill)
 
@@ -521,11 +724,35 @@ def main() -> int:
     # The argument checks come before the machine checks: a typo in --with or --arms used to be reported only on a box
     # that already had an idle GPU and the model on disk, so the feedback an operator got for a misspelled switch
     # depended on machine state.  parse_with raises; arms_for rejects an unknown --drop.
-    arms_now = arms_for(getattr(args, "drop", None), parse_with(getattr(args, "with_", None)))
+    # --expect is required with --with-arg, not optional. An engine argument that never arrived -- a typo, a flag
+    # this build does not have, a value the engine refuses -- produces an arm that is a second copy of the other
+    # one, and two arms agreeing reads as "the setting is worth nothing" rather than "the setting never ran".
+    if getattr(args, "with_arg", None) and not getattr(args, "expect", None):
+        print("--with-arg needs --expect TEXT: the string the engine's log must contain to prove the argument "
+              "took effect. Without it an argument that never arrived measures the other arm again and the two "
+              "agreeing looks like a result.", file=sys.stderr)
+        return 2
+    if getattr(args, "expect", None) and not getattr(args, "with_arg", None):
+        print("--expect without --with-arg: nothing would be checked against it.", file=sys.stderr)
+        return 2
+    arms_now = arms_for(getattr(args, "drop", None), parse_with(getattr(args, "with_", None)),
+                        parse_with_args(getattr(args, "with_arg", None)), getattr(args, "expect", None))
     unknown = [a for a in getattr(args, "arms", "").split(",") if a and a not in arms_now]
     if unknown:
-        print(f"--arms: no such arm {', '.join(unknown)}; this run has {', '.join(sorted(arms_now))}", file=sys.stderr)
+        hint = "" if "with" in arms_now else " (name one with --with or --with-arg to get a 'with' arm)"
+        print(f"--arms: no such arm {', '.join(unknown)}; this run has {', '.join(sorted(arms_now))}{hint}",
+              file=sys.stderr)
         return 2
+    # `decode` compares exactly two arms, and this belongs here with the other argument checks rather than
+    # inside cmd_decode, which runs after the machine checks below: `decode --arms off` on a box with a busy GPU
+    # reported "the GPU is not idle" and said nothing about the arms, so the feedback for a mistyped argument
+    # depended on machine state -- the very thing the comment at the top of this block says it fixed.
+    if args.cmd == "decode":
+        wanted = [a for a in args.arms.split(",") if a]
+        if len(wanted) != 2 or wanted[0] == wanted[1]:
+            print(f"--arms: decode compares exactly two different arms, got {args.arms!r}; this run has "
+                  f"{', '.join(sorted(arms_now))}", file=sys.stderr)
+            return 2
     if not gpu_is_idle():
         return 2
     for path in (SHARD1, SHARD2, MODELS / "pack-iq3-xxs", MODELS / "mtp/rt"):

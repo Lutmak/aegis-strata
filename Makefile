@@ -93,6 +93,16 @@ test: server
 # backticked paths that exist, the filter's instruction count and kill list against the code, and quoted
 # log lines that a reader could actually grep for.  No GPU, no model, under a second.
 	python3 tools/check_docs.py
+# The benchmark harness's own logic: which arms exist, what each one sets, and the guards that refuse a
+# comparison that could not mean anything.  A measuring instrument that quietly measures the wrong
+# configuration reports a number rather than an error, so the parts that decide what runs get tests.  No GPU.
+	@out=$$(python3 -m unittest discover -s tools -p 'test_bench_*.py' 2>&1); status=$$?; \
+	 echo "$$out" | tail -3; \
+	 [ $$status -eq 0 ] || exit $$status; \
+	 echo "$$out" | grep -qE '^Ran [1-9][0-9]* tests?' || \
+	   { echo 'harness tests: unittest discover registered NOTHING and still exited 0; the pattern'; \
+	     echo "             test_bench_*.py matched no test, so these assertions are not in the gate."; \
+	     exit 1; }
 # Last on purpose.  sandbox_test exits 77 when the kernel cannot enforce the sandbox, and make stops at the first
 # failure -- run earlier, a skip would silently take the rest of the suite with it, which is how a kernel without
 # Landlock used to turn into "no tests ran" rather than "one test skipped".  77 is still a failure and not a pass:
